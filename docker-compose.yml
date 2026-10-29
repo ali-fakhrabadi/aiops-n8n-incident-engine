@@ -1,0 +1,272 @@
+# AIOps Incident Engine - single-host stack.
+#
+#   make secrets   # once: generate ./secrets (Docker secrets, never in .env or Git)
+#   make up        # build, migrate and start; waits until health checks pass
+#
+# Networks:
+#   backend  internal only, no internet access: PostgreSQL, Redis, API, n8n
+#   edge     host ports and outbound traffic (LLM, Loki, notification channels): API, n8n
+#
+# Database roles (created by docker/postgres/initdb when the volume is first created):
+#   postgres     bootstrap superuser, initialisation and administration only
+#   aiops_owner  schema owner, used by the one-shot "migrate" service
+#   aiops_app    data access only, used by the API
+#   n8n          owner of the separate n8n database
+
+name: aiops
+
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
+# Every long-running service: read-only root filesystem, no Linux capabilities,
+# no privilege escalation, bounded logs.
+x-hardened: &hardened
+  read_only: true
+  cap_drop: [ALL]
+  security_opt: ["no-new-privileges:true"]
+  restart: unless-stopped
+  logging: *default-logging
+
+x-app-environment: &app-environment
+  AIOPS_ENVIRONMENT: production
+  AIOPS_LOG_LEVEL: ${AIOPS_LOG_LEVEL:-INFO}
+  AIOPS_DB_HOST: postgres
+  AIOPS_DB_NAME: aiops
+  AIOPS_DB_USER: aiops_app
+  AIOPS_DB_PASSWORD_FILE: /run/secrets/aiops_app_db_password
+  AIOPS_REDIS_HOST: redis
+  AIOPS_REDIS_PASSWORD_FILE: /run/secrets/redis_password
+  AIOPS_METRICS_TOKEN_FILE: /run/secrets/metrics_token
+
+x-app: &app
+  <<: *hardened
+  image: ${AIOPS_IMAGE:-aiops-n8n-incident-engine:local}
+  build:
+    context: .
+    target: runtime
+    args:
+      PIP_INDEX_URL: ${PIP_INDEX_URL:-}
+  tmpfs:
+    - /tmp:size=32m
+  environment: *app-environment
+
+services:
+  postgres:
+    <<: *hardened
+    image: postgres:17.11-alpine
+    # Runs as its own user from the start, so no capabilities are needed to drop privileges.
+    user: postgres
+    environment:
+      POSTGRES_DB: aiops
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD_FILE: /run/secrets/postgres_superuser_password
+      # scram-sha-256 for every TCP connection, loopback included (the image default
+      # trusts 127.0.0.1). The Unix socket stays trust for administration.
+      POSTGRES_INITDB_ARGS: --data-checksums --auth-host=scram-sha-256 --auth-local=trust
+    command: [postgres, -c, max_connections=100, -c, shared_buffers=128MB, -c, log_min_duration_statement=500]
+    secrets:
+      - postgres_superuser_password
+      - aiops_owner_db_password
+      - aiops_app_db_password
+      - n8n_db_password
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ./docker/postgres/initdb:/docker-entrypoint-initdb.d:ro
+    tmpfs:
+      - /var/run/postgresql
+      - /tmp
+    networks: [backend]
+    healthcheck:
+      # --host forces TCP, so the check fails while initdb runs its socket-only server.
+      test: ["CMD-SHELL", "pg_isready --host=127.0.0.1 --username=postgres --dbname=aiops"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 10s
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 512M
+
+  redis:
+    <<: *hardened
+    image: redis:7.4.11-alpine
+    user: redis
+    command: [redis-server, /run/secrets/redis.conf]
+    secrets:
+      - source: redis_conf
+        target: redis.conf
+      - redis_password
+    volumes:
+      - redis-data:/data
+    tmpfs:
+      - /tmp
+    networks: [backend]
+    healthcheck:
+      # The password reaches redis-cli through its environment, not its arguments.
+      test: ["CMD-SHELL", "REDISCLI_AUTH=\"$$(cat /run/secrets/redis_password)\" redis-cli ping | grep -q PONG"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 192M
+
+  migrate:
+    <<: *app
+    command: [alembic, upgrade, head]
+    restart: "no"
+    environment:
+      <<: *app-environment
+      AIOPS_DB_USER: aiops_owner
+      AIOPS_DB_PASSWORD_FILE: /run/secrets/aiops_owner_db_password
+    secrets: [aiops_owner_db_password]
+    networks: [backend]
+    healthcheck:
+      disable: true
+    depends_on:
+      postgres:
+        condition: service_healthy
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 256M
+
+  api:
+    <<: *app
+    secrets: [aiops_app_db_password, redis_password, metrics_token]
+    ports:
+      - "127.0.0.1:${AIOPS_HTTP_PORT:-8020}:8000"
+    networks: [backend, edge]
+    stop_grace_period: 25s
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 256M
+
+  n8n:
+    <<: *hardened
+    image: n8nio/n8n:2.45.6@sha256:45edf89655fd66dd55ea9336c1791ad14777599fdbf6c5aec6db583ede99a40b
+    environment:
+      DB_TYPE: postgresdb
+      DB_POSTGRESDB_HOST: postgres
+      DB_POSTGRESDB_DATABASE: n8n
+      DB_POSTGRESDB_USER: n8n
+      DB_POSTGRESDB_PASSWORD_FILE: /run/secrets/n8n_db_password
+      N8N_ENCRYPTION_KEY_FILE: /run/secrets/n8n_encryption_key
+      N8N_HOST: ${N8N_HOST:-localhost}
+      N8N_PORT: "5678"
+      N8N_PROTOCOL: ${N8N_PROTOCOL:-http}
+      N8N_WEBHOOK_URL: ${N8N_WEBHOOK_URL:-http://localhost:5678/}
+      GENERIC_TIMEZONE: ${TZ:-UTC}
+      TZ: ${TZ:-UTC}
+      N8N_LOG_LEVEL: info
+      N8N_LOG_FORMAT: json
+      # Self-hosted and private: no telemetry, update checks or template gallery calls.
+      N8N_DIAGNOSTICS_ENABLED: "false"
+      N8N_VERSION_NOTIFICATIONS_ENABLED: "false"
+      N8N_TEMPLATES_ENABLED: "false"
+      # Built-in nodes only: no community packages, verified or not (supply chain).
+      N8N_COMMUNITY_PACKAGES_ENABLED: "false"
+      N8N_UNVERIFIED_PACKAGES_ENABLED: "false"
+      # Workflows cannot read the container's environment.
+      N8N_BLOCK_ENV_ACCESS_IN_NODE: "true"
+      # The stricter limits n8n announces as future defaults, adopted now.
+      N8N_RUNNERS_TASK_TIMEOUT: "60"
+      N8N_COMPRESSION_NODE_MAX_DECOMPRESSED_SIZE_BYTES: "268435456"
+      N8N_COMPRESSION_NODE_MAX_ZIP_ENTRIES: "1000"
+      N8N_METRICS: "true"
+      EXECUTIONS_DATA_PRUNE: "true"
+      EXECUTIONS_DATA_MAX_AGE: "336"
+    secrets: [n8n_db_password, n8n_encryption_key]
+    volumes:
+      - n8n-data:/home/node/.n8n
+    tmpfs:
+      - /tmp
+      # n8n compiles its static assets here at start-up; the root filesystem is read-only.
+      - /home/node/.cache
+    ports:
+      - "127.0.0.1:${N8N_HTTP_PORT:-5678}:5678"
+    networks: [backend, edge]
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:5678/healthz/readiness"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 30s
+    depends_on:
+      postgres:
+        condition: service_healthy
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 1G
+
+  # Test runner with the dev tooling, against this stack's PostgreSQL and Redis:
+  # `make test`, `make lint`, `make typecheck`.
+  dev:
+    profiles: [dev]
+    image: aiops-n8n-incident-engine:dev
+    build:
+      context: .
+      target: dev
+      args:
+        PIP_INDEX_URL: ${PIP_INDEX_URL:-}
+    user: "${DEV_UID:-1000}:${DEV_GID:-1000}"
+    environment:
+      <<: *app-environment
+      AIOPS_ENVIRONMENT: test
+      AIOPS_TEST_INTEGRATION: "1"
+      AIOPS_METRICS_TOKEN_FILE: ""
+      HOME: /tmp
+    secrets: [aiops_app_db_password, redis_password]
+    volumes:
+      - .:/app
+    networks: [backend]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+networks:
+  backend:
+    internal: true
+  edge: {}
+
+volumes:
+  postgres-data:
+  redis-data:
+  n8n-data:
+
+secrets:
+  postgres_superuser_password:
+    file: ./secrets/postgres_superuser_password
+  aiops_owner_db_password:
+    file: ./secrets/aiops_owner_db_password
+  aiops_app_db_password:
+    file: ./secrets/aiops_app_db_password
+  n8n_db_password:
+    file: ./secrets/n8n_db_password
+  n8n_encryption_key:
+    file: ./secrets/n8n_encryption_key
+  redis_password:
+    file: ./secrets/redis_password
+  redis_conf:
+    file: ./secrets/redis.conf
+  metrics_token:
+    file: ./secrets/metrics_token

@@ -1,0 +1,16 @@
+# Development, test and CI tooling. Runtime versions are constrained to the
+# locked requirements.txt so tests run against exactly what ships in the image.
+# Edit this file, then run `make lock`.
+
+-c requirements.txt
+-r requirements.in
+
+pytest==9.1.1
+pytest-asyncio==1.4.0
+pytest-cov==7.1.0
+httpx==0.28.1
+
+ruff==0.17.1
+mypy==2.4.0
+
+pip-audit==2.10.1

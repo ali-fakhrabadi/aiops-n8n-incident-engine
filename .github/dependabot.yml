@@ -1,0 +1,43 @@
+# Weekly update PRs for pinned GitHub Actions and container images. Python
+# dependencies are upgraded deliberately with `make lock`, and CI's pip-audit job
+# flags known vulnerabilities in the lock file on every push.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      github-actions:
+        patterns: ["*"]
+    commit-message:
+      prefix: ci
+
+  - package-ecosystem: docker
+    directory: /
+    schedule:
+      interval: weekly
+    ignore:
+      # requirements.txt is resolved for Python 3.12: newer minor versions are a
+      # deliberate change together with `make lock`. Patch releases still come through.
+      - dependency-name: python
+        update-types: ["version-update:semver-major", "version-update:semver-minor"]
+    commit-message:
+      prefix: build
+
+  - package-ecosystem: docker-compose
+    directory: /
+    schedule:
+      interval: weekly
+    ignore:
+      # A PostgreSQL major version cannot start on an older data directory, and both
+      # images are also pinned in CI's service containers: majors are planned upgrades.
+      - dependency-name: postgres
+        update-types: ["version-update:semver-major"]
+      - dependency-name: redis
+        update-types: ["version-update:semver-major"]
+      # Workflows are exported from one n8n major; a new major is tested deliberately.
+      - dependency-name: n8nio/n8n
+        update-types: ["version-update:semver-major"]
+    commit-message:
+      prefix: build

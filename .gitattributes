@@ -1,0 +1,6 @@
+# Normalize line endings so shell scripts, Dockerfiles and SQL keep LF even
+# when the repository is checked out on Windows.
+* text=auto eol=lf
+
+*.png binary
+*.jpg binary
