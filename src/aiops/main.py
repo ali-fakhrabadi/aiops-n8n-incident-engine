@@ -7,17 +7,17 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
+from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from aiops import __version__
-from aiops.api import health, metrics
+from aiops.api import alerts, health, incidents, metrics
 from aiops.config import Settings, get_settings
 from aiops.db.engine import create_database_engine
 from aiops.db.migrations import expected_heads
 from aiops.errors import install_problem_handlers
 from aiops.logs import configure_logging
 from aiops.metrics import HttpMetrics, create_registry
-from aiops.middleware import RequestContextMiddleware
-from aiops.redis_client import create_redis_client
+from aiops.middleware import BodySizeLimitMiddleware, RequestContextMiddleware
 
 logger = logging.getLogger(__name__)
 
@@ -35,18 +35,18 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
-        # Connections open lazily: startup does not wait for PostgreSQL or Redis, and
-        # /health/ready reports them until they are reachable.
-        app.state.engine = create_database_engine(settings)
-        app.state.redis = create_redis_client(settings)
+        # Connections open lazily: startup does not wait for PostgreSQL, and
+        # /health/ready reports it until it is reachable.
+        engine = create_database_engine(settings)
+        app.state.engine = engine
+        app.state.session_factory = async_sessionmaker(engine, expire_on_commit=False)
         logger.info(
             "service started", extra={"version": __version__, "environment": settings.environment}
         )
         try:
             yield
         finally:
-            await app.state.redis.aclose()
-            await app.state.engine.dispose()
+            await engine.dispose()
             logger.info("service stopped")
 
     app = FastAPI(
@@ -63,6 +63,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     install_problem_handlers(app)
     app.include_router(health.router)
+    app.include_router(alerts.router)
+    app.include_router(incidents.router)
     app.include_router(metrics.router)
+    # The last middleware added runs first: request context wraps the size limit, so a
+    # 413 carries a request ID and shows up in the access log and metrics.
+    app.add_middleware(BodySizeLimitMiddleware, max_bytes=settings.max_request_bytes)
     app.add_middleware(RequestContextMiddleware, metrics=HttpMetrics(registry))
     return app

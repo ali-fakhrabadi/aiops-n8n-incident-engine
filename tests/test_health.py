@@ -20,19 +20,19 @@ async def test_readiness_reports_unreachable_dependencies(client: httpx.AsyncCli
     assert response.status_code == 503
     assert response.json() == {
         "status": "unavailable",
-        "checks": {"database": "unavailable", "migrations": "unavailable", "redis": "unavailable"},
+        "checks": {"database": "unavailable", "migrations": "unavailable"},
     }
 
 
 @pytest.mark.integration
-async def test_readiness_with_live_dependencies() -> None:
+async def test_readiness_with_live_dependencies(migrated: None) -> None:
     async with serve(live_settings()) as client:
         response = await client.get("/health/ready")
 
     assert response.status_code == 200
     assert response.json() == {
         "status": "ok",
-        "checks": {"database": "ok", "migrations": "ok", "redis": "ok"},
+        "checks": {"database": "ok", "migrations": "ok"},
     }
 
 

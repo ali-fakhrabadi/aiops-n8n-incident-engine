@@ -3,14 +3,18 @@
 #   make secrets   # once: generate ./secrets (Docker secrets, never in .env or Git)
 #   make up        # build, migrate and start; waits until health checks pass
 #
+# Flow: Alertmanager -> api (incidents + outbox in PostgreSQL) -> worker (outbox ->
+# Redis stream -> log context from Loki). Redis is the worker's only; the API does not
+# need it, so alerts are accepted while Redis is down.
+#
 # Networks:
-#   backend  internal only, no internet access: PostgreSQL, Redis, API, n8n
-#   edge     host ports and outbound traffic (LLM, Loki, notification channels): API, n8n
+#   backend  internal only, no internet access: PostgreSQL, Redis, API, worker, n8n
+#   edge     host ports and outbound traffic (Loki, LLM, notification channels)
 #
 # Database roles (created by docker/postgres/initdb when the volume is first created):
 #   postgres     bootstrap superuser, initialisation and administration only
-#   aiops_owner  schema owner, used by the one-shot "migrate" service
-#   aiops_app    data access only, used by the API
+#   aiops_owner  schema owner, used by the one-shot "migrate" service (and tests)
+#   aiops_app    data access only, used by the API and the worker
 #   n8n          owner of the separate n8n database
 
 name: aiops
@@ -37,9 +41,10 @@ x-app-environment: &app-environment
   AIOPS_DB_NAME: aiops
   AIOPS_DB_USER: aiops_app
   AIOPS_DB_PASSWORD_FILE: /run/secrets/aiops_app_db_password
+
+x-redis-environment: &redis-environment
   AIOPS_REDIS_HOST: redis
   AIOPS_REDIS_PASSWORD_FILE: /run/secrets/redis_password
-  AIOPS_METRICS_TOKEN_FILE: /run/secrets/metrics_token
 
 x-app: &app
   <<: *hardened
@@ -141,11 +146,43 @@ services:
 
   api:
     <<: *app
-    secrets: [aiops_app_db_password, redis_password, metrics_token]
+    environment:
+      <<: *app-environment
+      AIOPS_METRICS_TOKEN_FILE: /run/secrets/metrics_token
+      AIOPS_INGEST_TOKEN_FILE: /run/secrets/ingest_token
+      AIOPS_API_TOKEN_FILE: /run/secrets/api_token
+    secrets: [aiops_app_db_password, metrics_token, ingest_token, api_token]
     ports:
       - "127.0.0.1:${AIOPS_HTTP_PORT:-8020}:8000"
     networks: [backend, edge]
     stop_grace_period: 25s
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 256M
+
+  worker:
+    <<: *app
+    command: [python, -m, aiops.worker]
+    environment:
+      <<: [*app-environment, *redis-environment]
+      # Empty: no log context. Point it at a Loki, e.g. http://loki:3100.
+      AIOPS_LOKI_URL: ${AIOPS_LOKI_URL:-}
+    secrets: [aiops_app_db_password, redis_password]
+    networks: [backend, edge]
+    stop_grace_period: 30s
+    healthcheck:
+      # The consumer loop touches this file after every successful pass (at least every
+      # read_block_ms); a stale file means the loop is stuck or cannot reach Redis.
+      test: ["CMD", "python", "-c", "import os, sys, time; sys.exit(0 if time.time() - os.path.getmtime('/tmp/aiops-worker-heartbeat') < 30 else 1)"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 15s
     depends_on:
       migrate:
         condition: service_completed_successfully
@@ -216,8 +253,9 @@ services:
           cpus: "1.0"
           memory: 1G
 
-  # Test runner with the dev tooling, against this stack's PostgreSQL and Redis:
-  # `make test`, `make lint`, `make typecheck`.
+  # Test runner with the dev tooling: `make test`, `make lint`, `make typecheck`.
+  # Tests use their own database (aiops_test, migrated by the tests as its owner) and
+  # Redis database 1, so running them never touches the stack's incidents.
   dev:
     profiles: [dev]
     image: aiops-n8n-incident-engine:dev
@@ -228,12 +266,15 @@ services:
         PIP_INDEX_URL: ${PIP_INDEX_URL:-}
     user: "${DEV_UID:-1000}:${DEV_GID:-1000}"
     environment:
-      <<: *app-environment
+      <<: [*app-environment, *redis-environment]
       AIOPS_ENVIRONMENT: test
       AIOPS_TEST_INTEGRATION: "1"
-      AIOPS_METRICS_TOKEN_FILE: ""
+      AIOPS_DB_NAME: aiops_test
+      AIOPS_DB_USER: aiops_owner
+      AIOPS_DB_PASSWORD_FILE: /run/secrets/aiops_owner_db_password
+      AIOPS_REDIS_DB: "1"
       HOME: /tmp
-    secrets: [aiops_app_db_password, redis_password]
+    secrets: [aiops_owner_db_password, redis_password]
     volumes:
       - .:/app
     networks: [backend]
@@ -270,3 +311,7 @@ secrets:
     file: ./secrets/redis.conf
   metrics_token:
     file: ./secrets/metrics_token
+  ingest_token:
+    file: ./secrets/ingest_token
+  api_token:
+    file: ./secrets/api_token

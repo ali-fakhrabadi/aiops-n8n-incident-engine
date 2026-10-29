@@ -8,7 +8,8 @@
 pytest==9.1.1
 pytest-asyncio==1.4.0
 pytest-cov==7.1.0
-httpx==0.28.1
+# Mocks httpx transports: Loki answers in tests without a Loki.
+respx==0.23.1
 
 ruff==0.17.1
 mypy==2.4.0

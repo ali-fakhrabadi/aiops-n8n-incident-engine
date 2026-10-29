@@ -12,6 +12,8 @@ this directory except this file is ignored by Git.
 | `n8n_encryption_key` | n8n encrypts stored credentials (Slack, Telegram, ...) with it |
 | `redis_password`, `redis.conf` | Redis authentication (the config file carries the password) |
 | `metrics_token` | Bearer token Prometheus presents to scrape the API's `/metrics` |
+| `ingest_token` | Bearer token Alertmanager presents to deliver alerts |
+| `api_token` | Bearer token for reading incidents (operators, n8n) |
 
 Keep a backup of `n8n_encryption_key`: credentials stored in n8n cannot be decrypted
 without it.

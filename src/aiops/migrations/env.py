@@ -13,6 +13,7 @@ from alembic import context
 from sqlalchemy import Connection, pool
 from sqlalchemy.ext.asyncio import create_async_engine
 
+import aiops.incidents.models  # noqa: F401 - registers the tables on Base.metadata
 from aiops.config import DatabaseSettings
 from aiops.db.base import Base
 from aiops.db.engine import database_url

@@ -18,3 +18,5 @@ asyncpg==0.32.0
 alembic==1.20.0
 redis==8.1.0
 prometheus-client==0.26.0
+# HTTP client for Loki (and, from phase 3, the LLM and n8n).
+httpx==0.28.1

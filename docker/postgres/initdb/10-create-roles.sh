@@ -49,6 +49,11 @@ ALTER DEFAULT PRIVILEGES FOR ROLE aiops_owner IN SCHEMA public
 ALTER DEFAULT PRIVILEGES FOR ROLE aiops_owner IN SCHEMA public
     GRANT USAGE, SELECT ON SEQUENCES TO aiops_app;
 
+-- Throwaway database for the test suite (`make test`), owned by the schema owner, so tests
+-- can migrate and clean it without touching real incidents.
+CREATE DATABASE aiops_test OWNER aiops_owner;
+REVOKE ALL ON DATABASE aiops_test FROM PUBLIC;
+
 -- n8n keeps its workflows, credentials and executions in a database of its own.
 CREATE ROLE n8n WITH LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE PASSWORD :'n8n_password';
 CREATE DATABASE n8n OWNER n8n;

@@ -11,10 +11,13 @@ import argparse
 import json
 import subprocess
 import sys
+import time
 import urllib.error
 import urllib.request
+import uuid
 from collections.abc import Callable
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from http import HTTPStatus
 from pathlib import Path
 
@@ -32,8 +35,15 @@ class Reply:
         return json.loads(self.body)
 
 
-def fetch(url: str, headers: dict[str, str] | None = None, method: str = "GET") -> Reply:
-    request = urllib.request.Request(url, headers=headers or {}, method=method)
+def fetch(
+    url: str,
+    headers: dict[str, str] | None = None,
+    method: str = "GET",
+    body: object | None = None,
+) -> Reply:
+    data = None if body is None else json.dumps(body).encode()
+    all_headers = {**(headers or {}), **({"Content-Type": "application/json"} if data else {})}
+    request = urllib.request.Request(url, data=data, headers=all_headers, method=method)
     try:
         with urllib.request.urlopen(request, timeout=10) as response:
             return Reply(
@@ -63,7 +73,13 @@ class Smoke:
     def __init__(self, api: str, n8n: str, secrets: Path) -> None:
         self.api = api.rstrip("/")
         self.n8n = n8n.rstrip("/")
-        self.metrics_token = (secrets / "metrics_token").read_text(encoding="utf-8").strip()
+
+        def secret(name: str) -> str:
+            return (secrets / name).read_text(encoding="utf-8").strip()
+
+        self.metrics_token = secret("metrics_token")
+        self.ingest = {"Authorization": f"Bearer {secret('ingest_token')}"}
+        self.api_auth = {"Authorization": f"Bearer {secret('api_token')}"}
 
     def api_liveness(self) -> str | None:
         reply = fetch(f"{self.api}/health/live")
@@ -71,7 +87,7 @@ class Smoke:
 
     def api_readiness(self) -> str | None:
         reply = fetch(f"{self.api}/health/ready")
-        expected = {"status": "ok", "checks": {"database": "ok", "migrations": "ok", "redis": "ok"}}
+        expected = {"status": "ok", "checks": {"database": "ok", "migrations": "ok"}}
         return (
             None
             if reply.status == HTTPStatus.OK and reply.json() == expected
@@ -100,6 +116,56 @@ class Smoke:
         if scraped.status != HTTPStatus.OK or b"aiops_http_requests_total" not in scraped.body:
             return f"with the token: HTTP {scraped.status}"
         return None
+
+    def tokens_are_separate(self) -> str | None:
+        alerts = f"{self.api}/api/v1/alerts/alertmanager"
+        if (status := fetch(alerts, method="POST", body={}).status) != HTTPStatus.UNAUTHORIZED:
+            return f"alerts without a token: HTTP {status}"
+        incidents = f"{self.api}/api/v1/incidents"
+        if (status := fetch(incidents, headers=self.ingest).status) != HTTPStatus.UNAUTHORIZED:
+            return f"incidents with the ingest token: HTTP {status}"
+        return None
+
+    def alert_flows_through_the_pipeline(self) -> str | None:
+        """Deliver an alert like Alertmanager does; the worker must pick it up."""
+        now = datetime.now(UTC)
+        alert = {
+            "status": "firing",
+            "labels": {"alertname": "SmokeTest", "severity": "info", "smoke_test": "true"},
+            "annotations": {"summary": "Delivered by scripts/smoke_test.py"},
+            "startsAt": now.isoformat(),
+            "endsAt": "0001-01-01T00:00:00Z",
+            "generatorURL": "",
+            "fingerprint": uuid.uuid4().hex[:16],
+        }
+        delivery = {
+            "version": "4",
+            "groupKey": '{}:{alertname="SmokeTest"}',
+            "status": "firing",
+            "receiver": "smoke-test",
+            "alerts": [alert],
+        }
+        reply = fetch(f"{self.api}/api/v1/alerts/alertmanager", self.ingest, "POST", delivery)
+        if (
+            reply.status != HTTPStatus.OK
+            or not isinstance(body := reply.json(), dict)
+            or body.get("opened") != 1
+        ):
+            return f"delivery: HTTP {reply.status}: {reply.body!r}"
+        listing = fetch(f"{self.api}/api/v1/incidents?alertname=SmokeTest&limit=1", self.api_auth)
+        items = listing.json()["items"] if listing.status == HTTPStatus.OK else []  # type: ignore[index]
+        if not items:
+            return f"incident not listed: HTTP {listing.status}"
+        incident_url = f"{self.api}/api/v1/incidents/{items[0]['id']}"
+        deadline = time.monotonic() + 20
+        while time.monotonic() < deadline:
+            detail = fetch(incident_url, self.api_auth).json()
+            if isinstance(detail, dict) and detail.get("context_status") != "pending":
+                kinds = [event["kind"] for event in detail["events"]]
+                expected = ["opened", "context_collected"]
+                return None if kinds == expected else f"timeline {kinds}, expected {expected}"
+            time.sleep(0.5)
+        return "the worker did not process the incident within 20 s"
 
     def n8n_ready(self) -> str | None:
         reply = fetch(f"{self.n8n}/healthz/readiness")
@@ -149,9 +215,14 @@ def main() -> int:
     smoke = Smoke(args.api, args.n8n, args.secrets)
     checks: list[tuple[str, Callable[[], str | None]]] = [
         ("API liveness", smoke.api_liveness),
-        ("API readiness: PostgreSQL, Redis, migrations at head", smoke.api_readiness),
+        ("API readiness: PostgreSQL and migrations at head", smoke.api_readiness),
         ("Errors are problem+json and carry the request ID", smoke.problem_details),
         ("Metrics require the bearer token", smoke.metrics_protected),
+        ("Alert delivery and incident API need their own tokens", smoke.tokens_are_separate),
+        (
+            "An alert flows API -> outbox -> Redis stream -> worker",
+            smoke.alert_flows_through_the_pipeline,
+        ),
         ("n8n ready (its database reachable)", smoke.n8n_ready),
         (
             "PostgreSQL and Redis are not published on the host",

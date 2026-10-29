@@ -6,8 +6,7 @@ from typing import cast
 
 from fastapi import Request
 from prometheus_client import CollectorRegistry
-from redis.asyncio import Redis
-from sqlalchemy.ext.asyncio import AsyncEngine
+from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 from aiops.config import Settings
 
@@ -24,8 +23,8 @@ def get_engine(request: Request) -> AsyncEngine:
     return cast("AsyncEngine", request.app.state.engine)
 
 
-def get_redis(request: Request) -> Redis:
-    return cast("Redis", request.app.state.redis)
+def get_session_factory(request: Request) -> async_sessionmaker[AsyncSession]:
+    return cast("async_sessionmaker[AsyncSession]", request.app.state.session_factory)
 
 
 def get_migration_heads(request: Request) -> frozenset[str]:

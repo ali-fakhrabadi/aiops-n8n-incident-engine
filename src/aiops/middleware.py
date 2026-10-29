@@ -13,6 +13,7 @@ import time
 import uuid
 from http import HTTPStatus
 
+from fastapi import HTTPException
 from starlette.datastructures import MutableHeaders
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
@@ -43,6 +44,48 @@ def _route_template(scope: Scope) -> str:
     route = scope.get("route")
     path = getattr(route, "path", None)
     return path if isinstance(path, str) else UNMATCHED_ROUTE
+
+
+class BodySizeLimitMiddleware:
+    """Reject request bodies over `max_bytes` with 413, declared or not.
+
+    A Content-Length over the limit is refused before reading; a chunked body is counted
+    while it streams in, so a client cannot bypass the limit by omitting the header.
+    """
+
+    def __init__(self, app: ASGIApp, max_bytes: int) -> None:
+        self._app = app
+        self._max_bytes = max_bytes
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] != "http":
+            await self._app(scope, receive, send)
+            return
+        for name, value in scope.get("headers", []):
+            if name == b"content-length" and value.isdigit() and int(value) > self._max_bytes:
+                await self._too_large()(scope, receive, send)
+                return
+
+        received = 0
+
+        async def limited_receive() -> Message:
+            nonlocal received
+            message = await receive()
+            if message["type"] == "http.request":
+                received += len(message.get("body", b""))
+                if received > self._max_bytes:
+                    # An HTTPException, so FastAPI's body parsing re-raises it unchanged.
+                    raise HTTPException(HTTPStatus.REQUEST_ENTITY_TOO_LARGE, detail=self._detail)
+            return message
+
+        await self._app(scope, limited_receive, send)
+
+    @property
+    def _detail(self) -> str:
+        return f"The request body is larger than {self._max_bytes} bytes."
+
+    def _too_large(self) -> ASGIApp:
+        return problem_response(HTTPStatus.REQUEST_ENTITY_TOO_LARGE, detail=self._detail)
 
 
 class RequestContextMiddleware:

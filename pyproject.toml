@@ -39,7 +39,7 @@ select = [
 
 [tool.ruff.lint.per-file-ignores]
 # pytest injects fixtures as arguments and asserts are the point of a test.
-"tests/**" = ["S101", "S105", "S106", "PLR2004"]
+"tests/**" = ["S101", "S105", "S106", "PLR2004", "PLR0913"]
 # The smoke test is a command-line tool: it prints results and runs docker.
 "scripts/**" = ["T20", "S603", "S607", "S310"]
 
@@ -80,6 +80,9 @@ filterwarnings = ["error"]
 [tool.coverage.run]
 source = ["aiops"]
 branch = true
+# SQLAlchemy's asyncio layer runs on greenlets; without this, lines after an await
+# that touched the database are missed.
+concurrency = ["greenlet", "thread"]
 # Migrations run through Alembic, not the test suite.
 omit = ["*/aiops/migrations/*"]
 

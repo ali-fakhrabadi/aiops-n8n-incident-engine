@@ -72,10 +72,10 @@ class DatabaseSettings(SecretFileSettings):
     db_application_name: str = "aiops-engine"
 
 
-class Settings(DatabaseSettings):
-    """Settings of the API process."""
+class RuntimeSettings(DatabaseSettings):
+    """Settings shared by the API and the worker."""
 
-    secret_fields: ClassVar[tuple[str, ...]] = ("db_password", "redis_password", "metrics_token")
+    secret_fields: ClassVar[tuple[str, ...]] = ("db_password", "redis_password")
 
     environment: Literal["development", "test", "production"] = "production"
     log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR"] = "INFO"
@@ -87,13 +87,44 @@ class Settings(DatabaseSettings):
     redis_password_file: Path | None = None
     redis_timeout_seconds: float = Field(default=2.0, gt=0, le=60)
 
+    # Incident events travel from the outbox table to this Redis stream.
+    stream_name: str = "aiops:incidents"
+    dead_letter_stream_name: str = "aiops:incidents:dead"
+    consumer_group: str = "aiops-workers"
+    # Keep roughly this many entries per stream (XADD MAXLEN ~).
+    stream_max_length: int = Field(default=100_000, ge=1000)
+
+
+class Settings(RuntimeSettings):
+    """Settings of the API process."""
+
+    secret_fields: ClassVar[tuple[str, ...]] = (
+        "db_password",
+        "redis_password",
+        "metrics_token",
+        "ingest_token",
+        "api_token",
+    )
+
     # Bearer token Prometheus presents to scrape /metrics.
     metrics_token: SecretStr
     metrics_token_file: Path | None = None
+    # Bearer token Alertmanager presents to deliver alerts.
+    ingest_token: SecretStr
+    ingest_token_file: Path | None = None
+    # Bearer token for the incident API (operators, n8n).
+    api_token: SecretStr
+    api_token_file: Path | None = None
 
     readiness_timeout_seconds: float = Field(default=2.0, gt=0, le=30)
+    max_request_bytes: int = Field(default=1_048_576, ge=1024)
+    max_alerts_per_request: int = Field(default=500, ge=1, le=10_000)
 
-    @field_validator("metrics_token")
+    # The same alert opening this many incidents within the window is flapping.
+    flap_threshold: int = Field(default=3, ge=2)
+    flap_window_minutes: int = Field(default=60, ge=1)
+
+    @field_validator("metrics_token", "ingest_token", "api_token")
     @classmethod
     def _long_enough(cls, value: SecretStr) -> SecretStr:
         if len(value.get_secret_value()) < MIN_TOKEN_LENGTH:
@@ -102,7 +133,40 @@ class Settings(DatabaseSettings):
         return value
 
 
+class WorkerSettings(RuntimeSettings):
+    """Settings of the worker process (outbox relay and stream consumer)."""
+
+    # Loki to collect log context from; empty disables log collection.
+    loki_url: str | None = None
+    loki_timeout_seconds: float = Field(default=10.0, gt=0, le=120)
+    loki_lookback_minutes: int = Field(default=15, ge=1, le=360)
+    loki_lookahead_minutes: int = Field(default=2, ge=0, le=60)
+    loki_max_lines: int = Field(default=200, ge=1, le=5000)
+    loki_max_line_length: int = Field(default=2000, ge=100, le=65_536)
+
+    relay_poll_seconds: float = Field(default=0.5, gt=0, le=60)
+    relay_batch_size: int = Field(default=100, ge=1, le=1000)
+    read_block_ms: int = Field(default=2000, ge=100, le=60_000)
+    # A message not acknowledged for this long is claimed again (retry with back-off).
+    claim_idle_seconds: float = Field(default=60.0, ge=0)
+    max_deliveries: int = Field(default=5, ge=1, le=100)
+    consumer_name: str | None = None
+    # 0 picks a free port (tests run several workers in one host).
+    metrics_port: int = Field(default=9101, ge=0, le=65535)
+    heartbeat_file: Path = Path("/tmp/aiops-worker-heartbeat")  # noqa: S108 - tmpfs in the container
+
+    @field_validator("loki_url")
+    @classmethod
+    def _http_url(cls, value: str | None) -> str | None:
+        if not value:
+            return None
+        if not value.startswith(("http://", "https://")):
+            msg = "must be an http:// or https:// URL"
+            raise ValueError(msg)
+        return value.rstrip("/")
+
+
 @lru_cache
 def get_settings() -> Settings:
-    """Settings of this process, read once from the environment."""
+    """Settings of the API process, read once from the environment."""
     return Settings()

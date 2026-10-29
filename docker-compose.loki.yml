@@ -1,0 +1,19 @@
+# Optional overlay: collect log context from the Loki of the observability stack
+# (github.com/ali-fakhrabadi/cloud-native-observability-iac) running on the same host.
+#
+# Enable it in .env:
+#   COMPOSE_FILE=docker-compose.yml:docker-compose.loki.yml
+#
+# Only the worker joins that stack's network, and it only reads from Loki's query API.
+# Any other Loki works too: leave this file out and set AIOPS_LOKI_URL instead.
+
+services:
+  worker:
+    environment:
+      AIOPS_LOKI_URL: ${AIOPS_LOKI_URL:-http://loki:3100}
+    networks: [backend, edge, observability]
+
+networks:
+  observability:
+    external: true
+    name: ${OBSERVABILITY_NETWORK:-observability_backend}

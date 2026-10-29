@@ -35,6 +35,8 @@ create_random n8n_db_password
 create_random n8n_encryption_key
 create_random redis_password
 create_random metrics_token
+create_random ingest_token
+create_random api_token
 
 # Redis reads its password from its configuration file, which therefore is a secret too.
 redis_conf="$DIR/redis.conf"

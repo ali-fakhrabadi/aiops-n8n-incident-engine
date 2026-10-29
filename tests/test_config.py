@@ -59,7 +59,12 @@ def test_settings_come_from_prefixed_environment(monkeypatch: pytest.MonkeyPatch
     monkeypatch.setenv("AIOPS_METRICS_TOKEN", METRICS_TOKEN)
     monkeypatch.delenv("AIOPS_METRICS_TOKEN_FILE", raising=False)
 
-    settings = Settings(db_password=SecretStr("unused"), db_password_file=None)
+    settings = Settings(
+        db_password=SecretStr("unused"),
+        db_password_file=None,
+        ingest_token=SecretStr("ingest-token-0123456789"),
+        api_token=SecretStr("api-token-0123456789ab"),
+    )
 
     assert settings.log_level == "WARNING"
     assert settings.redis_port == 6390
