@@ -70,9 +70,10 @@ def psql_as(role: str, secret: str, database: str, sql: str) -> subprocess.Compl
 
 
 class Smoke:
-    def __init__(self, api: str, n8n: str, secrets: Path) -> None:
+    def __init__(self, api: str, n8n: str, secrets: Path, pipeline_timeout: float) -> None:
         self.api = api.rstrip("/")
         self.n8n = n8n.rstrip("/")
+        self.pipeline_timeout = pipeline_timeout
 
         def secret(name: str) -> str:
             return (secrets / name).read_text(encoding="utf-8").strip()
@@ -157,15 +158,15 @@ class Smoke:
         if not items:
             return f"incident not listed: HTTP {listing.status}"
         incident_url = f"{self.api}/api/v1/incidents/{items[0]['id']}"
-        deadline = time.monotonic() + 20
+        deadline = time.monotonic() + self.pipeline_timeout
         while time.monotonic() < deadline:
             detail = fetch(incident_url, self.api_auth).json()
-            if isinstance(detail, dict) and detail.get("context_status") != "pending":
+            if isinstance(detail, dict) and detail.get("analysis_status") != "pending":
                 kinds = [event["kind"] for event in detail["events"]]
-                expected = ["opened", "context_collected"]
+                expected = ["opened", "context_collected", "analysis_completed"]
                 return None if kinds == expected else f"timeline {kinds}, expected {expected}"
             time.sleep(0.5)
-        return "the worker did not process the incident within 20 s"
+        return f"the worker did not process the incident within {self.pipeline_timeout:.0f} s"
 
     def n8n_ready(self) -> str | None:
         reply = fetch(f"{self.n8n}/healthz/readiness")
@@ -210,9 +211,15 @@ def main() -> int:
     parser.add_argument("--api", default="http://127.0.0.1:8020")
     parser.add_argument("--n8n", default="http://127.0.0.1:5678")
     parser.add_argument("--secrets", type=Path, default=ROOT / "secrets")
+    parser.add_argument(
+        "--pipeline-timeout",
+        type=float,
+        default=20,
+        help="seconds to wait for the analysis (a CPU-only LLM needs a few minutes)",
+    )
     args = parser.parse_args()
 
-    smoke = Smoke(args.api, args.n8n, args.secrets)
+    smoke = Smoke(args.api, args.n8n, args.secrets, args.pipeline_timeout)
     checks: list[tuple[str, Callable[[], str | None]]] = [
         ("API liveness", smoke.api_liveness),
         ("API readiness: PostgreSQL and migrations at head", smoke.api_readiness),
@@ -220,7 +227,7 @@ def main() -> int:
         ("Metrics require the bearer token", smoke.metrics_protected),
         ("Alert delivery and incident API need their own tokens", smoke.tokens_are_separate),
         (
-            "An alert flows API -> outbox -> Redis stream -> worker",
+            "An alert flows API -> outbox -> stream -> log context -> analysis",
             smoke.alert_flows_through_the_pipeline,
         ),
         ("n8n ready (its database reachable)", smoke.n8n_ready),

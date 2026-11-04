@@ -84,7 +84,7 @@ async def test_the_worker_process_handles_an_alert_end_to_end(
         for _ in range(100):
             async with sessions() as session:
                 incident = await session.scalar(select(Incident))
-            if incident is not None and incident.context_status != "pending":
+            if incident is not None and incident.analysis_status != "pending":
                 break
             await asyncio.sleep(0.05)
     finally:
@@ -93,6 +93,7 @@ async def test_the_worker_process_handles_an_alert_end_to_end(
 
     assert incident is not None
     assert incident.context_status == "skipped"  # no Loki configured here
+    assert incident.analysis_status == "completed"  # the mock analyser
     assert settings.heartbeat_file.exists()
     redis = create_redis_client(settings)
     for key in (settings.stream_name, settings.dead_letter_stream_name):

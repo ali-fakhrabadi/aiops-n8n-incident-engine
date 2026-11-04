@@ -87,5 +87,7 @@ async def detail(incident_id: uuid.UUID, sessions: Sessions) -> IncidentDetail:
         generator_url=incident.generator_url,
         context=incident.context,
         context_updated_at=incident.context_updated_at,
+        analysis=incident.analysis,
+        analysis_updated_at=incident.analysis_updated_at,
         events=[IncidentEventOut.model_validate(event) for event in events],
     )

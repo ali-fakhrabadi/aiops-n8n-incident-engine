@@ -8,7 +8,7 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict
 
-from aiops.incidents.models import ContextStatus, IncidentStatus, Severity
+from aiops.incidents.models import AnalysisStatus, ContextStatus, IncidentStatus, Severity
 
 
 class IngestResponse(BaseModel):
@@ -36,6 +36,7 @@ class IncidentSummary(BaseModel):
     resolved_at: datetime | None
     notification_count: int
     context_status: ContextStatus
+    analysis_status: AnalysisStatus
 
 
 class IncidentEventOut(BaseModel):
@@ -52,6 +53,8 @@ class IncidentDetail(IncidentSummary):
     generator_url: str | None
     context: dict[str, Any] | None
     context_updated_at: datetime | None
+    analysis: dict[str, Any] | None
+    analysis_updated_at: datetime | None
     events: list[IncidentEventOut]
 
 

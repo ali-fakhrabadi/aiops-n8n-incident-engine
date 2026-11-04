@@ -161,6 +161,7 @@ async def test_resolved_on_arrival_needs_no_investigation(
     [incident] = await _incidents(sessions)
     assert incident.status == "resolved"
     assert incident.context_status == "skipped"
+    assert incident.analysis_status == "skipped"
     assert [kind for kind, _ in await _events(sessions)] == ["opened", "resolved"]
     assert await _outbox(sessions) == []
 

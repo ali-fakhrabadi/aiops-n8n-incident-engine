@@ -136,6 +136,24 @@ class Settings(RuntimeSettings):
 class WorkerSettings(RuntimeSettings):
     """Settings of the worker process (outbox relay and stream consumer)."""
 
+    secret_fields: ClassVar[tuple[str, ...]] = ("db_password", "redis_password", "openai_api_key")
+
+    # Root-cause analysis. "mock" is deterministic and needs no model (CI, demos);
+    # "ollama" keeps every alert and log line on this host; "openai" is any
+    # OpenAI-compatible chat completions API.
+    analyzer: Literal["mock", "ollama", "openai"] = "mock"
+    llm_model: str = "llama3.1"
+    ollama_url: str = "http://host.docker.internal:11434"
+    openai_base_url: str = "https://api.openai.com"
+    openai_api_key: SecretStr | None = None
+    openai_api_key_file: Path | None = None
+    # A CPU-only 8B model needs a minute or two per incident.
+    llm_timeout_seconds: float = Field(default=300.0, gt=0, le=1800)
+    llm_num_ctx: int = Field(default=8192, ge=2048, le=131_072)
+    # How much of the collected log context goes into the prompt.
+    llm_max_log_lines: int = Field(default=150, ge=0, le=2000)
+    llm_max_log_chars: int = Field(default=12_000, ge=0, le=200_000)
+
     # Loki to collect log context from; empty disables log collection.
     loki_url: str | None = None
     loki_timeout_seconds: float = Field(default=10.0, gt=0, le=120)
@@ -148,7 +166,9 @@ class WorkerSettings(RuntimeSettings):
     relay_batch_size: int = Field(default=100, ge=1, le=1000)
     read_block_ms: int = Field(default=2000, ge=100, le=60_000)
     # A message not acknowledged for this long is claimed again (retry with back-off).
-    claim_idle_seconds: float = Field(default=60.0, ge=0)
+    # Keep it above llm_timeout_seconds, or a second worker may claim an analysis that
+    # is still running.
+    claim_idle_seconds: float = Field(default=600.0, ge=0)
     max_deliveries: int = Field(default=5, ge=1, le=100)
     consumer_name: str | None = None
     # 0 picks a free port (tests run several workers in one host).
@@ -157,13 +177,27 @@ class WorkerSettings(RuntimeSettings):
 
     @field_validator("loki_url")
     @classmethod
-    def _http_url(cls, value: str | None) -> str | None:
-        if not value:
-            return None
-        if not value.startswith(("http://", "https://")):
-            msg = "must be an http:// or https:// URL"
+    def _optional_http_url(cls, value: str | None) -> str | None:
+        return _http_url(value) if value else None
+
+    @field_validator("ollama_url", "openai_base_url")
+    @classmethod
+    def _required_http_url(cls, value: str) -> str:
+        return _http_url(value)
+
+    @model_validator(mode="after")
+    def _analyzer_is_configured(self) -> WorkerSettings:
+        if self.analyzer == "openai" and self.openai_api_key is None:
+            msg = "analyzer 'openai' needs openai_api_key (or openai_api_key_file)"
             raise ValueError(msg)
-        return value.rstrip("/")
+        return self
+
+
+def _http_url(value: str) -> str:
+    if not value.startswith(("http://", "https://")):
+        msg = "must be an http:// or https:// URL"
+        raise ValueError(msg)
+    return value.rstrip("/")
 
 
 @lru_cache

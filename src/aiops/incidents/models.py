@@ -55,11 +55,20 @@ class ContextStatus(StrEnum):
     FAILED = "failed"  # Loki kept failing until the retries ran out
 
 
+class AnalysisStatus(StrEnum):
+    PENDING = "pending"  # waiting for the log context, then the analyser
+    COMPLETED = "completed"  # an analysis is stored
+    FAILED = "failed"  # the analyser rejected the request or kept failing
+    SKIPPED = "skipped"  # nothing to analyse (resolved on arrival)
+
+
 class EventKind(StrEnum):
     OPENED = "opened"
     RESOLVED = "resolved"
     CONTEXT_COLLECTED = "context_collected"
     CONTEXT_FAILED = "context_failed"
+    ANALYSIS_COMPLETED = "analysis_completed"
+    ANALYSIS_FAILED = "analysis_failed"
 
 
 def _in(values: type[StrEnum]) -> str:
@@ -73,6 +82,7 @@ class Incident(Base):
         CheckConstraint(f"status IN ({_in(IncidentStatus)})", name="status"),
         CheckConstraint(f"severity IN ({_in(Severity)})", name="severity"),
         CheckConstraint(f"context_status IN ({_in(ContextStatus)})", name="context_status"),
+        CheckConstraint(f"analysis_status IN ({_in(AnalysisStatus)})", name="analysis_status"),
         CheckConstraint("notification_count >= 1", name="notification_count"),
         # Newest-first listing with keyset pagination.
         Index("ix_incidents_first_received_at_id", "first_received_at", "id"),
@@ -97,6 +107,9 @@ class Incident(Base):
     context_status: Mapped[str] = mapped_column(String(16))
     context: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
     context_updated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    analysis_status: Mapped[str] = mapped_column(String(16))
+    analysis: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
+    analysis_updated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
 class IncidentEvent(Base):

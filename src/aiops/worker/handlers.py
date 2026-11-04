@@ -8,6 +8,7 @@ therefore conditional on the state they expect.
 from __future__ import annotations
 
 import logging
+import time
 import uuid
 from collections.abc import Callable, Mapping
 from datetime import UTC, datetime, timedelta
@@ -16,9 +17,18 @@ from typing import Any, Protocol
 from sqlalchemy import update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from aiops.analysis.providers import Analyzer, AnalyzerError
+from aiops.analysis.service import build_request, finalize
 from aiops.config import WorkerSettings
-from aiops.incidents.ingest import TOPIC_OPENED
-from aiops.incidents.models import ContextStatus, EventKind, Incident, IncidentEvent
+from aiops.incidents.models import (
+    AnalysisStatus,
+    ContextStatus,
+    EventKind,
+    Incident,
+    IncidentEvent,
+    OutboxMessage,
+)
+from aiops.incidents.topics import TOPIC_CONTEXT_READY, TOPIC_OPENED
 from aiops.logcontext.loki import LokiClient, LokiQueryError
 from aiops.logcontext.redaction import redact
 from aiops.logcontext.selectors import selector_for
@@ -154,8 +164,112 @@ class CollectLogContext:
                 else EventKind.CONTEXT_COLLECTED
             )
             session.add(IncidentEvent(incident_id=incident_id, kind=kind, details=details))
+            # Next stage, in the same transaction: analysis runs with whatever was found,
+            # including nothing (the alert alone is still worth a look).
+            session.add(
+                OutboxMessage(topic=TOPIC_CONTEXT_READY, payload={"incident_id": str(incident_id)})
+            )
         self._metrics.contexts.labels(status.value).inc()
         logger.info(
             "log context stored",
             extra={"incident_id": str(incident_id), **details},
         )
+
+
+class AnalyzeIncident:
+    """incident.context_ready -> a root-cause analysis, checked before it is stored."""
+
+    topic = TOPIC_CONTEXT_READY
+
+    def __init__(
+        self,
+        sessions: async_sessionmaker[AsyncSession],
+        analyzer: Analyzer,
+        settings: WorkerSettings,
+        metrics: WorkerMetrics,
+        clock: Callable[[], datetime] = lambda: datetime.now(UTC),
+    ) -> None:
+        self._sessions = sessions
+        self._analyzer = analyzer
+        self._settings = settings
+        self._metrics = metrics
+        self._clock = clock
+
+    async def handle(self, payload: Mapping[str, Any]) -> None:
+        incident_id = incident_id_of(payload)
+        async with self._sessions() as session:
+            incident = await session.get(Incident, incident_id)
+        if incident is None:
+            msg = f"incident {incident_id} does not exist"
+            raise PermanentError(msg)
+        if incident.analysis_status != AnalysisStatus.PENDING:
+            return  # a redelivery of work already done
+
+        request = build_request(
+            incident,
+            max_lines=self._settings.llm_max_log_lines,
+            max_chars=self._settings.llm_max_log_chars,
+        )
+        provider = self._analyzer.provider
+        started = time.perf_counter()
+        try:
+            # AnalyzerUnavailableError propagates: the message is retried later.
+            result = await self._analyzer.analyze(request)
+        except AnalyzerError as exc:
+            await self._store(
+                incident_id,
+                AnalysisStatus.FAILED,
+                {"reason": str(exc), "provider": provider, "model": self._analyzer.model},
+            )
+            return
+        finally:
+            self._metrics.analysis_seconds.labels(provider).observe(time.perf_counter() - started)
+        duration_ms = round((time.perf_counter() - started) * 1000)
+        await self._store(
+            incident_id, AnalysisStatus.COMPLETED, finalize(result, request, duration_ms)
+        )
+
+    async def on_exhausted(self, payload: Mapping[str, Any], reason: str) -> None:
+        await self._store(
+            incident_id_of(payload),
+            AnalysisStatus.FAILED,
+            {"reason": reason, "provider": self._analyzer.provider, "model": self._analyzer.model},
+        )
+
+    async def _store(
+        self, incident_id: uuid.UUID, status: AnalysisStatus, analysis: dict[str, Any]
+    ) -> None:
+        async with self._sessions() as session, session.begin():
+            changed = await session.scalar(
+                update(Incident)
+                .where(
+                    Incident.id == incident_id, Incident.analysis_status == AnalysisStatus.PENDING
+                )
+                .values(
+                    analysis=analysis, analysis_status=status, analysis_updated_at=self._clock()
+                )
+                .returning(Incident.id)
+            )
+            if changed is None:
+                return  # another delivery got there first
+            details: dict[str, Any] = {
+                key: analysis[key]
+                for key in ("provider", "model", "duration_ms", "confidence", "reason")
+                if key in analysis
+            }
+            if status == AnalysisStatus.COMPLETED:
+                details["commands"] = len(analysis["suggested_commands"])
+                details["commands_rejected"] = len(analysis["rejected_commands"])
+                details["evidence_dropped"] = analysis["evidence_dropped"]
+            kind = (
+                EventKind.ANALYSIS_COMPLETED
+                if status == AnalysisStatus.COMPLETED
+                else EventKind.ANALYSIS_FAILED
+            )
+            session.add(IncidentEvent(incident_id=incident_id, kind=kind, details=details))
+        provider = str(analysis.get("provider", "unknown"))
+        self._metrics.analyses.labels(provider, status.value).inc()
+        if status == AnalysisStatus.COMPLETED:
+            self._metrics.commands_rejected.labels(provider).inc(len(analysis["rejected_commands"]))
+            self._metrics.evidence_dropped.labels(provider).inc(analysis["evidence_dropped"])
+        logger.info("analysis stored", extra={"incident_id": str(incident_id), **details})

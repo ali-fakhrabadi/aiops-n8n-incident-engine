@@ -25,6 +25,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from aiops.incidents.alertmanager import AlertmanagerAlert, AlertmanagerWebhook
 from aiops.incidents.models import (
+    AnalysisStatus,
     ContextStatus,
     EventKind,
     Incident,
@@ -32,9 +33,7 @@ from aiops.incidents.models import (
     IncidentStatus,
     OutboxMessage,
 )
-
-TOPIC_OPENED = "incident.opened"
-TOPIC_RESOLVED = "incident.resolved"
+from aiops.incidents.topics import TOPIC_OPENED, TOPIC_RESOLVED
 
 
 class Outcome(StrEnum):
@@ -115,6 +114,7 @@ class _Delivery:
                 flapping=False,
                 # An alert that is already resolved when first seen needs no investigation.
                 context_status=ContextStatus.SKIPPED if resolved else ContextStatus.PENDING,
+                analysis_status=AnalysisStatus.SKIPPED if resolved else AnalysisStatus.PENDING,
             )
             .on_conflict_do_nothing(index_elements=["fingerprint", "starts_at"])
             .returning(Incident.id)

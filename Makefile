@@ -28,7 +28,7 @@ UV_COMPILE := /tmp/.local/bin/uv pip compile --quiet --generate-hashes \
 	--custom-compile-command "make lock"
 
 .PHONY: help env secrets lock build up down destroy ps logs migrate revision \
-	test lint format typecheck audit ci smoke
+	test lint format typecheck audit ci smoke evaluate
 
 help: ## Show this help
 	@awk 'BEGIN {FS = ":.*## "} /^[a-zA-Z0-9_.-]+:.*## / {printf "  \033[36m%-12s\033[0m %s\n", $$1, $$2}' $(MAKEFILE_LIST)
@@ -97,3 +97,8 @@ ci: lint typecheck test audit ## Run the same checks as CI
 
 smoke: ## End-to-end checks of the running stack
 	python3 scripts/smoke_test.py $(SMOKE_ARGS)
+
+evaluate: ## Run the analysis scenarios (EVAL_ARGS="--analyzer ollama --model llama3.1")
+	docker run --rm --network host --volume "$(CURDIR):/app" --workdir /app \
+		--user "$(DEV_UID):$(DEV_GID)" --env HOME=/tmp \
+		aiops-n8n-incident-engine:dev python scripts/evaluate_analysis.py $(EVAL_ARGS)

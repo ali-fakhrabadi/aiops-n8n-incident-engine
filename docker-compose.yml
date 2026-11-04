@@ -172,6 +172,13 @@ services:
       <<: [*app-environment, *redis-environment]
       # Empty: no log context. Point it at a Loki, e.g. http://loki:3100.
       AIOPS_LOKI_URL: ${AIOPS_LOKI_URL:-}
+      # mock (default, no model), ollama (local) or openai (docker-compose.openai.yml).
+      AIOPS_ANALYZER: ${AIOPS_ANALYZER:-mock}
+      AIOPS_LLM_MODEL: ${AIOPS_LLM_MODEL:-llama3.1}
+      AIOPS_OLLAMA_URL: ${AIOPS_OLLAMA_URL:-http://host.docker.internal:11434}
+    # Ollama usually runs on the host itself (it wants all of the machine's memory).
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     secrets: [aiops_app_db_password, redis_password]
     networks: [backend, edge]
     stop_grace_period: 30s
@@ -196,7 +203,9 @@ services:
 
   n8n:
     <<: *hardened
-    image: n8nio/n8n:2.45.6@sha256:45edf89655fd66dd55ea9336c1791ad14777599fdbf6c5aec6db583ede99a40b
+    # Digest-pinned. Override (N8N_IMAGE) only for an image loaded from a file, which
+    # keeps no registry digest; verify its ID against the pinned manifest first.
+    image: ${N8N_IMAGE:-n8nio/n8n:2.45.6@sha256:45edf89655fd66dd55ea9336c1791ad14777599fdbf6c5aec6db583ede99a40b}
     environment:
       DB_TYPE: postgresdb
       DB_POSTGRESDB_HOST: postgres

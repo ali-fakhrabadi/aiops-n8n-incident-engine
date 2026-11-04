@@ -32,3 +32,28 @@ class WorkerMetrics:
             ["status"],
             registry=registry,
         )
+        self.analyses = Counter(
+            "aiops_analyses_total",
+            "Root-cause analyses by provider and result (completed, failed).",
+            ["provider", "status"],
+            registry=registry,
+        )
+        self.analysis_seconds = Histogram(
+            "aiops_analysis_seconds",
+            "Time the analyser took per incident, by provider.",
+            ["provider"],
+            buckets=(0.05, 0.5, 1.0, 2.5, 5.0, 10.0, 30.0, 60.0, 120.0, 300.0, 600.0),
+            registry=registry,
+        )
+        self.commands_rejected = Counter(
+            "aiops_analysis_commands_rejected_total",
+            "Suggested commands the read-only allowlist rejected, by provider.",
+            ["provider"],
+            registry=registry,
+        )
+        self.evidence_dropped = Counter(
+            "aiops_analysis_evidence_dropped_total",
+            "Evidence quotes dropped because they were not in the logs or the alert, by provider.",
+            ["provider"],
+            registry=registry,
+        )

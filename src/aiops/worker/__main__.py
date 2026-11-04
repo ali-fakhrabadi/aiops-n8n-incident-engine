@@ -17,6 +17,7 @@ from prometheus_client import start_http_server
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from aiops import __version__
+from aiops.analysis.providers import build_analyzer
 from aiops.config import WorkerSettings
 from aiops.db.engine import create_database_engine
 from aiops.logcontext.loki import LokiClient
@@ -24,7 +25,7 @@ from aiops.logs import configure_logging
 from aiops.metrics import create_registry
 from aiops.redis_client import create_redis_client
 from aiops.worker.consumer import StreamConsumer
-from aiops.worker.handlers import CollectLogContext
+from aiops.worker.handlers import AnalyzeIncident, CollectLogContext, Handler
 from aiops.worker.metrics import WorkerMetrics
 from aiops.worker.relay import OutboxRelay
 
@@ -45,11 +46,19 @@ async def run(settings: WorkerSettings, stop: asyncio.Event | None = None) -> No
     redis = create_redis_client(settings, socket_timeout=settings.read_block_ms / 1000 + 5)
     http = httpx.AsyncClient(timeout=settings.loki_timeout_seconds)
     loki = LokiClient(settings.loki_url, http) if settings.loki_url else None
+    # Its own client: a CPU-bound model needs a far longer timeout than Loki.
+    llm_http = httpx.AsyncClient(timeout=settings.llm_timeout_seconds)
+    analyzer = build_analyzer(settings, llm_http)
 
-    handler = CollectLogContext(sessions, loki, settings, metrics)
+    handlers: list[Handler] = [
+        CollectLogContext(sessions, loki, settings, metrics),
+        AnalyzeIncident(sessions, analyzer, settings, metrics),
+    ]
     consumer_name = settings.consumer_name or f"{socket.gethostname()}-{os.getpid()}"
     relay = OutboxRelay(sessions, redis, settings, metrics)
-    consumer = StreamConsumer(redis, settings, {handler.topic: handler}, metrics, consumer_name)
+    consumer = StreamConsumer(
+        redis, settings, {handler.topic: handler for handler in handlers}, metrics, consumer_name
+    )
 
     if stop is None:
         stop = asyncio.Event()
@@ -64,6 +73,7 @@ async def run(settings: WorkerSettings, stop: asyncio.Event | None = None) -> No
             "consumer": consumer_name,
             "stream": settings.stream_name,
             "loki": bool(loki),
+            "analyzer": f"{analyzer.provider}:{analyzer.model}",
         },
     )
     try:
@@ -72,6 +82,7 @@ async def run(settings: WorkerSettings, stop: asyncio.Event | None = None) -> No
             tasks.create_task(consumer.run(stop))
     finally:
         await http.aclose()
+        await llm_http.aclose()
         await redis.aclose()
         await engine.dispose()
         logger.info("worker stopped")

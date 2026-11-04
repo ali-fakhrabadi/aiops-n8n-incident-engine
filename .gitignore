@@ -21,3 +21,6 @@ reports/
 .vscode/
 .DS_Store
 Thumbs.db
+
+# Output of `make evaluate`; measured results worth keeping are committed under another name.
+evaluation/results/latest.json
