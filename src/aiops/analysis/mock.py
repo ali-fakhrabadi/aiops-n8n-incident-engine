@@ -140,7 +140,8 @@ def mock_analysis(request: AnalysisRequest) -> LlmAnalysis:
                 )
                 for line in hits[:3]
             ]
-            confidence = Confidence.HIGH if len(hits) >= 3 else Confidence.MEDIUM  # noqa: PLR2004
+            occurrences = sum(line.repeats for line in hits)
+            confidence = Confidence.HIGH if occurrences >= 3 else Confidence.MEDIUM  # noqa: PLR2004
             return LlmAnalysis(
                 summary=f"{request.alert.alertname}: {signature.cause}",
                 probable_cause=signature.cause,

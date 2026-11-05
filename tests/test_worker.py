@@ -1,18 +1,23 @@
 from __future__ import annotations
 
+import asyncio
 import json
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Mapping
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from typing import Any
 
 import httpx
 import pytest
 import respx
+from prometheus_client import CollectorRegistry
 from redis.asyncio import Redis
 from sqlalchemy import update
 
 from aiops.incidents.models import OutboxMessage
+from aiops.worker.consumer import StreamConsumer
 from aiops.worker.handlers import CollectLogContext
+from aiops.worker.metrics import WorkerMetrics
 from tests.conftest import worker_settings
 from tests.factories import STARTS_AT, alert
 from tests.pipeline import LOKI, NOW, QUERY_RANGE, Pipeline, Sessions, entries, loki_lines
@@ -230,3 +235,40 @@ async def test_redelivery_of_finished_work_changes_nothing(pipeline: Pipeline) -
 
     assert (await pipeline.incident(incident.id)).context_status == "collected"
     assert await pipeline.events(incident.id) == ["opened", "context_collected"]
+
+
+class SlowHandler:
+    """Works for a while, like an analysis on a CPU, and looks at the heartbeat meanwhile."""
+
+    topic = "incident.slow"
+
+    def __init__(self, heartbeat: Path) -> None:
+        self._heartbeat = heartbeat
+        self.seen: list[float | None] = []
+
+    async def handle(self, payload: Mapping[str, Any]) -> None:
+        for _ in range(4):
+            await asyncio.sleep(0.05)
+            exists = self._heartbeat.exists()
+            self.seen.append(self._heartbeat.stat().st_mtime_ns if exists else None)
+
+    async def on_exhausted(self, payload: Mapping[str, Any], reason: str) -> None:
+        raise AssertionError  # never called here
+
+
+async def test_the_heartbeat_keeps_ticking_while_a_handler_works(
+    redis: Redis, tmp_path: Path
+) -> None:
+    settings = worker_settings(tmp_path, heartbeat_interval_seconds=0.02)
+    handler = SlowHandler(settings.heartbeat_file)
+    consumer = StreamConsumer(
+        redis, settings, {handler.topic: handler}, WorkerMetrics(CollectorRegistry()), "test"
+    )
+    await consumer.ensure_group()
+    await redis.xadd(settings.stream_name, {"topic": handler.topic, "payload": "{}"})
+
+    assert await consumer.run_once() == 1
+
+    # run_once itself never touches it: the ticker did, again and again.
+    assert None not in handler.seen
+    assert len(set(handler.seen)) > 1

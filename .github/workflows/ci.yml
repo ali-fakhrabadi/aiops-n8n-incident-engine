@@ -181,6 +181,7 @@ jobs:
           docker compose config --quiet
           docker compose --profile dev config --quiet
           COMPOSE_FILE=docker-compose.yml docker compose config --quiet
+          COMPOSE_FILE=docker-compose.yml:docker-compose.observability.yml docker compose config --quiet
 
       - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
 
@@ -224,6 +225,11 @@ jobs:
 
       - name: Smoke test (alert to Telegram, retries included)
         run: python3 scripts/smoke_test.py --fake-telegram
+
+      - name: n8n comes back after a restart of its container
+        run: |
+          docker compose restart n8n
+          docker compose up --detach --no-build --wait --wait-timeout 120 n8n
 
       - name: Diagnostics
         if: failure()

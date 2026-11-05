@@ -144,7 +144,7 @@ class StreamConsumer:
             return
         started = time.perf_counter()
         try:
-            await handler.handle(payload)
+            await self._handle(handler, payload)
         except PermanentError as exc:
             logger.warning(
                 "message dropped", extra={"id": message_id, "topic": topic, "reason": str(exc)}
@@ -161,6 +161,26 @@ class StreamConsumer:
             await self._ack(message_id, topic, "processed")
         finally:
             self._metrics.duration.labels(topic).observe(time.perf_counter() - started)
+
+    async def _handle(self, handler: Handler, payload: Mapping[str, Any]) -> None:
+        """Run a handler while the heartbeat keeps ticking.
+
+        An analysis can take minutes on a CPU (bounded by the analyser's timeout, as every
+        handler is bounded by its own); the worker is busy then, not stuck, and must not
+        be reported unhealthy, or restarted, for it.
+        """
+        ticker = asyncio.create_task(self._tick())
+        try:
+            await handler.handle(payload)
+        finally:
+            ticker.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await ticker
+
+    async def _tick(self) -> None:
+        while True:
+            _touch(self._settings.heartbeat_file)
+            await asyncio.sleep(self._settings.heartbeat_interval_seconds)
 
     async def _dead_letter(self, message_id: str, fields: Mapping[str, str], attempts: int) -> None:
         topic = fields.get("topic", "")

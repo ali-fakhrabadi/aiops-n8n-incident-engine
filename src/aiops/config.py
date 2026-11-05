@@ -88,8 +88,10 @@ class RuntimeSettings(DatabaseSettings):
     redis_password_file: Path | None = None
     redis_timeout_seconds: float = Field(default=2.0, gt=0, le=60)
 
-    # Incident events travel from the outbox table to this Redis stream.
+    # Incident events travel from the outbox table to this Redis stream; analysis requests
+    # have a stream of their own, so a slow model never holds up anything else.
     stream_name: str = "aiops:incidents"
+    analysis_stream_name: str = "aiops:incidents:analysis"
     dead_letter_stream_name: str = "aiops:incidents:dead"
     consumer_group: str = "aiops-workers"
     # Keep roughly this many entries per stream (XADD MAXLEN ~).
@@ -198,6 +200,9 @@ class WorkerSettings(RuntimeSettings):
     # 0 picks a free port (tests run several workers in one host).
     metrics_port: int = Field(default=9101, ge=0, le=65535)
     heartbeat_file: Path = Path("/tmp/aiops-worker-heartbeat")  # noqa: S108 - tmpfs in the container
+    # How often the heartbeat is touched while a handler works (the health check allows
+    # 30 s of silence).
+    heartbeat_interval_seconds: float = Field(default=5.0, gt=0, le=20)
 
     @field_validator("loki_url", "n8n_webhook_url")
     @classmethod

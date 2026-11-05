@@ -68,16 +68,26 @@ async def run(settings: WorkerSettings, stop: asyncio.Event | None = None) -> No
         else None
     )
 
+    analyze = AnalyzeIncident(sessions, analyzer, settings, metrics)
     handlers: list[Handler] = [
         CollectLogContext(sessions, loki, settings, metrics),
-        AnalyzeIncident(sessions, analyzer, settings, metrics),
         NotifyIncident(TOPIC_ANALYZED, sessions, n8n, metrics),
         NotifyIncident(TOPIC_RESOLVED, sessions, n8n, metrics),
+        # Analysis requests published to this stream before analysis had a lane of its own.
+        analyze,
     ]
     consumer_name = settings.consumer_name or f"{socket.gethostname()}-{os.getpid()}"
     relay = OutboxRelay(sessions, redis, settings, metrics)
     consumer = StreamConsumer(
         redis, settings, {handler.topic: handler for handler in handlers}, metrics, consumer_name
+    )
+    # The analysis lane: the same consumer on the analysis stream, one model call at a time.
+    analysis = StreamConsumer(
+        redis,
+        settings.model_copy(update={"stream_name": settings.analysis_stream_name}),
+        {analyze.topic: analyze},
+        metrics,
+        consumer_name,
     )
 
     if stop is None:
@@ -91,7 +101,7 @@ async def run(settings: WorkerSettings, stop: asyncio.Event | None = None) -> No
         extra={
             "version": __version__,
             "consumer": consumer_name,
-            "stream": settings.stream_name,
+            "streams": [settings.stream_name, settings.analysis_stream_name],
             "loki": bool(loki),
             "analyzer": f"{analyzer.provider}:{analyzer.model}",
             "notifications": bool(n8n),
@@ -101,6 +111,7 @@ async def run(settings: WorkerSettings, stop: asyncio.Event | None = None) -> No
         async with asyncio.TaskGroup() as tasks:
             tasks.create_task(relay.run(stop))
             tasks.create_task(consumer.run(stop))
+            tasks.create_task(analysis.run(stop))
     finally:
         await http.aclose()
         await llm_http.aclose()

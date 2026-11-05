@@ -1,4 +1,4 @@
-"""Transactional outbox relay: committed events -> Redis stream.
+"""Transactional outbox relay: committed events -> Redis streams (analysis has its own).
 
 Rows are locked with SKIP LOCKED, so several worker replicas share the work without
 publishing a row twice. A crash between XADD and the commit publishes those rows again
@@ -19,6 +19,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from aiops.config import WorkerSettings
 from aiops.incidents.models import OutboxMessage
+from aiops.incidents.topics import ANALYSIS_TOPICS
 from aiops.worker.metrics import WorkerMetrics
 
 logger = logging.getLogger(__name__)
@@ -60,7 +61,9 @@ class OutboxRelay:
             async with self._redis.pipeline(transaction=False) as pipe:
                 for row in rows:
                     pipe.xadd(
-                        settings.stream_name,
+                        settings.analysis_stream_name
+                        if row.topic in ANALYSIS_TOPICS
+                        else settings.stream_name,
                         {
                             "event_id": str(row.id),
                             "topic": row.topic,

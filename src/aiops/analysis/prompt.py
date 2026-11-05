@@ -59,11 +59,14 @@ class PromptLine:
     level: str
     source: str
     text: str
+    # How often the line occurred in the window (the first occurrence is shown).
+    repeats: int = 1
 
     @property
     def rendered(self) -> str:
         """The line as the model sees it (models often quote it whole, prefix included)."""
-        return f"{self.timestamp} [{self.level or '-'}] {self.source}: {self.text}"
+        line = f"{self.timestamp} [{self.level or '-'}] {self.source}: {self.text}"
+        return f"{line} [repeated {self.repeats} times]" if self.repeats > 1 else line
 
 
 @dataclass(frozen=True)
@@ -114,11 +117,33 @@ def _score(line: Mapping[str, Any]) -> int:
     return 0
 
 
+def _source(line: Mapping[str, Any]) -> str:
+    labels = line.get("labels", {})
+    return str(labels.get("container") or labels.get("compose_service", ""))
+
+
 def select_lines(
     lines: Sequence[Mapping[str, Any]], *, max_lines: int, max_chars: int
 ) -> tuple[list[PromptLine], int]:
-    """Severe lines first, then the newest, within the budget; returned in time order."""
-    ranked = sorted(range(len(lines)), key=lambda i: (_score(lines[i]), i), reverse=True)
+    """Severe lines first, then the newest, within the budget; returned in time order.
+
+    A line that repeats (same level, source and text: an error burst, a retry loop) is
+    shown once with its count, so the budget holds more distinct evidence and a CPU
+    model is not kept busy reading the same line two hundred times.
+    """
+    first: dict[tuple[str, str, str], int] = {}
+    repeats: dict[int, int] = {}
+    newest: dict[int, int] = {}
+    for index, line in enumerate(lines):
+        key = (
+            str(line.get("labels", {}).get("level", "")),
+            _source(line),
+            str(line.get("line", ""))[:_MAX_LINE_CHARS],
+        )
+        origin = first.setdefault(key, index)
+        repeats[origin] = repeats.get(origin, 0) + 1
+        newest[origin] = index
+    ranked = sorted(repeats, key=lambda i: (_score(lines[i]), newest[i]), reverse=True)
     chosen: list[int] = []
     used = 0
     for index in ranked:
@@ -132,15 +157,13 @@ def select_lines(
         PromptLine(
             timestamp=_clock_time(str(lines[i].get("ts", ""))),
             level=str(lines[i].get("labels", {}).get("level", "")),
-            source=str(
-                lines[i].get("labels", {}).get("container")
-                or lines[i].get("labels", {}).get("compose_service", "")
-            ),
+            source=_source(lines[i]),
             text=str(lines[i].get("line", ""))[:_MAX_LINE_CHARS],
+            repeats=repeats[i],
         )
         for i in chosen
     ]
-    return selected, len(lines) - len(selected)
+    return selected, len(lines) - sum(line.repeats for line in selected)
 
 
 def _delimiter(incident_id: uuid.UUID) -> str:

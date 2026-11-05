@@ -96,6 +96,10 @@ async def test_the_worker_process_handles_an_alert_end_to_end(
     assert incident.analysis_status == "completed"  # the mock analyser
     assert settings.heartbeat_file.exists()
     redis = create_redis_client(settings)
-    for key in (settings.stream_name, settings.dead_letter_stream_name):
+    for key in (
+        settings.stream_name,
+        settings.analysis_stream_name,
+        settings.dead_letter_stream_name,
+    ):
         await redis.delete(key)
     await redis.aclose()

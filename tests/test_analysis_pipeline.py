@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from collections.abc import AsyncIterator, Callable
 from datetime import timedelta
 from pathlib import Path
@@ -11,12 +12,17 @@ import respx
 from redis.asyncio import Redis
 
 from aiops.analysis.prompt import AnalysisRequest
-from aiops.analysis.providers import AnalyzerError, AnalyzerResult, AnalyzerUnavailableError
+from aiops.analysis.providers import (
+    Analyzer,
+    AnalyzerError,
+    AnalyzerResult,
+    AnalyzerUnavailableError,
+)
 from aiops.analysis.schema import Confidence, Evidence, LlmAnalysis, SuggestedCommand
 from aiops.worker.handlers import AnalyzeIncident
 from tests.conftest import worker_settings
 from tests.factories import STARTS_AT, alert
-from tests.pipeline import LOKI, NOW, QUERY_RANGE, Pipeline, Sessions, loki_lines
+from tests.pipeline import LOKI, NOW, QUERY_RANGE, Pipeline, Sessions, entries, loki_lines
 
 pytestmark = pytest.mark.integration
 
@@ -63,7 +69,7 @@ async def make_pipeline(
 ) -> AsyncIterator[MakePipeline]:
     built: list[Pipeline] = []
 
-    def make(analyzer: StubAnalyzer | None = None, **overrides: Any) -> Pipeline:
+    def make(analyzer: Analyzer | None = None, **overrides: Any) -> Pipeline:
         settings = worker_settings(tmp_path, **{"loki_url": LOKI, **overrides})
         pipeline = Pipeline(sessions, redis, settings, settings.loki_url is not None, analyzer)
         built.append(pipeline)
@@ -233,3 +239,63 @@ async def test_resolved_on_arrival_is_not_analysed(make_pipeline: MakePipeline) 
     await pipeline.run()
 
     assert (await pipeline.incident(incident.id)).analysis_status == "skipped"
+
+
+class BlockingAnalyzer:
+    """An analysis that takes as long as the test wants (a CPU-bound model, say)."""
+
+    provider = "stub"
+    model = "stub-1"
+
+    def __init__(self) -> None:
+        self.started = asyncio.Event()
+        self.release = asyncio.Event()
+
+    async def analyze(self, request: AnalysisRequest) -> AnalyzerResult:
+        self.started.set()
+        await self.release.wait()
+        return AnalyzerResult(
+            _answer(), self.provider, self.model, prompt_tokens=None, completion_tokens=None
+        )
+
+
+async def test_analysis_requests_have_a_stream_of_their_own(make_pipeline: MakePipeline) -> None:
+    pipeline = make_pipeline(loki_url=None)
+    await pipeline.deliver(alert())
+
+    await pipeline.run()  # incident.opened -> log context, queues incident.context_ready
+    await pipeline.relay.publish_batch()
+
+    main = await entries(pipeline.redis, pipeline.settings.stream_name)
+    lane = await entries(pipeline.redis, pipeline.settings.analysis_stream_name)
+    assert [fields["topic"] for _, fields in main] == ["incident.opened"]
+    assert [fields["topic"] for _, fields in lane] == ["incident.context_ready"]
+
+
+async def test_a_slow_analysis_does_not_hold_up_other_incidents(
+    make_pipeline: MakePipeline,
+) -> None:
+    analyzer = BlockingAnalyzer()
+    pipeline = make_pipeline(analyzer, loki_url=None)
+    [first] = await pipeline.deliver(alert(fingerprint="aaaa000000000001"))
+    await pipeline.run()
+    await pipeline.relay.publish_batch()
+    stop = asyncio.Event()
+    lanes = asyncio.gather(pipeline.consumer.run(stop), pipeline.analysis.run(stop))
+    try:
+        await asyncio.wait_for(analyzer.started.wait(), timeout=5)  # the analysis lane is busy
+        incidents = await pipeline.deliver(alert("DiskFull", fingerprint="bbbb000000000002"))
+        [second] = [incident for incident in incidents if incident.id != first.id]
+        await pipeline.relay.publish_batch()
+        for _ in range(100):
+            if (await pipeline.incident(second.id)).context_status != "pending":
+                break
+            await asyncio.sleep(0.05)
+
+        assert (await pipeline.incident(second.id)).context_status == "skipped"
+        assert (await pipeline.incident(first.id)).analysis_status == "pending"
+    finally:
+        analyzer.release.set()
+        stop.set()
+        await asyncio.wait_for(lanes, timeout=10)
+    assert (await pipeline.incident(first.id)).analysis_status == "completed"

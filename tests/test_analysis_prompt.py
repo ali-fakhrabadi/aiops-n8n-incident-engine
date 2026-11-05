@@ -60,12 +60,49 @@ def test_severe_lines_win_the_budget_and_order_is_kept() -> None:
 
 
 def test_the_character_budget_is_respected() -> None:
-    lines = [_line(i, "x" * 400) for i in range(10)]
+    lines = [_line(i, f"{i}" + "x" * 399) for i in range(10)]
 
     selected, _ = select_lines(lines, max_lines=100, max_chars=1000)
 
     assert sum(len(line.text) for line in selected) <= 1000
     assert len(selected) == 2
+
+
+def test_a_repeated_line_is_shown_once_with_its_count() -> None:
+    burst = [_line(i, '{"level": "error", "msg": "db timeout"}', level="error") for i in range(40)]
+    other = _line(41, "checkout started", level="info")
+
+    selected, omitted = select_lines([*burst, other], max_lines=10, max_chars=10_000)
+
+    assert [(line.text, line.repeats) for line in selected] == [
+        ('{"level": "error", "msg": "db timeout"}', 40),
+        ("checkout started", 1),
+    ]
+    assert omitted == 0
+    assert selected[0].timestamp == "09:00:00.250"  # the first occurrence
+    assert selected[0].rendered.endswith('db timeout"} [repeated 40 times]')
+    assert "[repeated" not in selected[1].rendered
+
+
+def test_the_same_text_from_another_source_or_level_is_kept_apart() -> None:
+    lines = [
+        _line(0, "connection reset", level="warn"),
+        _line(1, "connection reset", level="error"),
+    ]
+    lines.append(
+        {
+            **_line(2, "connection reset", level="error"),
+            "labels": {"level": "error", "container": "db-1"},
+        }
+    )
+
+    selected, _ = select_lines(lines, max_lines=10, max_chars=10_000)
+
+    assert [(line.level, line.source, line.repeats) for line in selected] == [
+        ("warn", "shop-api-1", 1),
+        ("error", "shop-api-1", 1),
+        ("error", "db-1", 1),
+    ]
 
 
 def test_logs_are_delimited_as_untrusted_data() -> None:

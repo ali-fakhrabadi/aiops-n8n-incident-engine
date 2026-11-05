@@ -80,6 +80,7 @@ def worker_settings(tmp_path: Path, **overrides: Any) -> WorkerSettings:
     values: dict[str, Any] = {
         "environment": "test",
         "stream_name": f"test:{run}:incidents",
+        "analysis_stream_name": f"test:{run}:analysis",
         "dead_letter_stream_name": f"test:{run}:dead",
         "consumer_group": "test-workers",
         "consumer_name": "test-consumer",

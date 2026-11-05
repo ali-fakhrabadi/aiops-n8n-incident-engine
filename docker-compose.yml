@@ -242,7 +242,7 @@ services:
     tmpfs:
       # The decrypted credentials exist only here, in memory, during the import.
       - /tmp
-      - /home/node/.cache
+      - /home/node/.cache:uid=1000,gid=1000,mode=0700
     networks: [backend]
     healthcheck:
       disable: true
@@ -307,7 +307,9 @@ services:
     tmpfs:
       - /tmp
       # n8n compiles its static assets here at start-up; the root filesystem is read-only.
-      - /home/node/.cache
+      # Owned by the node user explicitly: Docker remounts a tmpfs owned by root when a
+      # container restarts, and n8n would crash-loop after its first restart.
+      - /home/node/.cache:uid=1000,gid=1000,mode=0700
     ports:
       - "127.0.0.1:${N8N_HTTP_PORT:-5678}:5678"
     networks: [backend, edge]
