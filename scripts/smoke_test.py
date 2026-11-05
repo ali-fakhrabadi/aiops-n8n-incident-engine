@@ -71,8 +71,10 @@ def psql_as(role: str, secret: str, database: str, sql: str) -> subprocess.Compl
 
 
 FINAL = {"delivered", "suppressed", "failed"}
-# Two injected Telegram failures, each followed by the Telegram node's 5 s wait.
-RETRY_WAITS = 10
+# One injected Telegram failure: the page, sent first, gets it and waits the Telegram
+# node's 5 s before its retry. (A second one could hit the analysis message instead,
+# which follows within a second when the analyser is the mock.)
+RETRY_WAITS = 5
 
 
 class Smoke:
@@ -269,8 +271,8 @@ class Smoke:
         return None
 
     def telegram_failures_are_retried(self) -> str | None:
-        """The fake Bot API fails twice (502); n8n's retries still deliver the page."""
-        self._fake_telegram("/_test/faults", {"status": 502, "count": 2})
+        """The fake Bot API fails once (502); n8n's retry still delivers the page."""
+        self._fake_telegram("/_test/faults", {"status": 502, "count": 1})
         detail, problem = self._incident_through_n8n("critical", frozenset({"page"}))
         if detail is None:
             return problem
