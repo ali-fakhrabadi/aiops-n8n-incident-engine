@@ -10,13 +10,13 @@ from fastapi import FastAPI
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from aiops import __version__
-from aiops.api import alerts, health, incidents, metrics
+from aiops.api import alerts, health, incidents, metrics, notifications
 from aiops.config import Settings, get_settings
 from aiops.db.engine import create_database_engine
 from aiops.db.migrations import expected_heads
 from aiops.errors import install_problem_handlers
 from aiops.logs import configure_logging
-from aiops.metrics import HttpMetrics, create_registry
+from aiops.metrics import HttpMetrics, NotificationMetrics, create_registry
 from aiops.middleware import BodySizeLimitMiddleware, RequestContextMiddleware
 
 logger = logging.getLogger(__name__)
@@ -24,7 +24,8 @@ logger = logging.getLogger(__name__)
 DESCRIPTION = """
 Receives Prometheus/Alertmanager alerts, enriches them with Loki logs, asks an LLM
 (Ollama, OpenAI or a deterministic mock) for a root-cause analysis with safe diagnostic
-commands, and hands the result to n8n for severity-based routing.
+commands, and hands the result to n8n for severity-based routing; n8n reports each
+delivery back.
 """
 
 
@@ -59,12 +60,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     )
     app.state.settings = settings
     app.state.registry = registry
+    app.state.notification_metrics = NotificationMetrics(registry)
     app.state.migration_heads = expected_heads()
 
     install_problem_handlers(app)
     app.include_router(health.router)
     app.include_router(alerts.router)
     app.include_router(incidents.router)
+    app.include_router(notifications.router)
     app.include_router(metrics.router)
     # The last middleware added runs first: request context wraps the size limit, so a
     # 413 carries a request ID and shows up in the access log and metrics.

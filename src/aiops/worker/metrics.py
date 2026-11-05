@@ -51,6 +51,21 @@ class WorkerMetrics:
             ["provider"],
             registry=registry,
         )
+        self.handoffs = Counter(
+            "aiops_notification_handoffs_total",
+            "Notifications handed to n8n, by kind and outcome (accepted, unavailable "
+            "after the attempts of one delivery, rejected).",
+            ["kind", "outcome"],
+            registry=registry,
+        )
+        self.handoff_seconds = Histogram(
+            "aiops_notification_handoff_seconds",
+            "Time to hand one notification to n8n, retries and back-off included, by "
+            "outcome (n8n answers before it calls the channel).",
+            ["outcome"],
+            buckets=(0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 30.0, 60.0),
+            registry=registry,
+        )
         self.evidence_dropped = Counter(
             "aiops_analysis_evidence_dropped_total",
             "Evidence quotes dropped because they were not in the logs or the alert, by provider.",

@@ -1,8 +1,9 @@
 """Bearer-token checks; each caller class has its own token.
 
 Alertmanager can only deliver (ingest token), Prometheus can only scrape (metrics
-token), and operators or n8n read incidents (API token). A leaked token exposes one
-capability, and each can be rotated without touching the others.
+token), operators read incidents (API token) and n8n can only report deliveries
+(callback token). A leaked token exposes one capability, and each can be rotated
+without touching the others.
 """
 
 from __future__ import annotations
@@ -22,6 +23,9 @@ _ingest = HTTPBearer(
 )
 _api = HTTPBearer(
     auto_error=False, scheme_name="ApiToken", description="Token for reading incidents."
+)
+_callback = HTTPBearer(
+    auto_error=False, scheme_name="CallbackToken", description="n8n's delivery-report token."
 )
 _metrics = HTTPBearer(auto_error=False, scheme_name="MetricsToken")
 
@@ -53,6 +57,13 @@ async def require_api_token(
     credentials: Annotated[Credentials, Depends(_api)],
 ) -> None:
     check_bearer(credentials, settings.api_token, "api")
+
+
+async def require_callback_token(
+    settings: Annotated[Settings, Depends(get_settings)],
+    credentials: Annotated[Credentials, Depends(_callback)],
+) -> None:
+    check_bearer(credentials, settings.callback_token, "callback")
 
 
 async def require_metrics_token(

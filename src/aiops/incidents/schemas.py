@@ -8,7 +8,14 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict
 
-from aiops.incidents.models import AnalysisStatus, ContextStatus, IncidentStatus, Severity
+from aiops.incidents.models import (
+    AnalysisStatus,
+    ContextStatus,
+    IncidentStatus,
+    NotificationKind,
+    NotificationStatus,
+    Severity,
+)
 
 
 class IngestResponse(BaseModel):
@@ -47,6 +54,24 @@ class IncidentEventOut(BaseModel):
     details: dict[str, Any]
 
 
+class NotificationOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: uuid.UUID
+    kind: NotificationKind
+    status: NotificationStatus
+    reported_status: IncidentStatus
+    created_at: datetime
+    handed_off_at: datetime | None
+    handoff_attempts: int
+    claimed_at: datetime | None
+    completed_at: datetime | None
+    route: str | None
+    channel: str | None
+    channel_message_id: str | None
+    error: str | None
+
+
 class IncidentDetail(IncidentSummary):
     fingerprint: str
     annotations: dict[str, str]
@@ -55,6 +80,7 @@ class IncidentDetail(IncidentSummary):
     context_updated_at: datetime | None
     analysis: dict[str, Any] | None
     analysis_updated_at: datetime | None
+    notifications: list[NotificationOut]
     events: list[IncidentEventOut]
 
 

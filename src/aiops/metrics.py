@@ -57,3 +57,35 @@ class HttpMetrics:
     def observe(self, method: str, route: str, status: int, seconds: float) -> None:
         self._requests.labels(method, route, str(status)).inc()
         self._duration.labels(method, route).observe(seconds)
+
+
+_NOTIFICATION_BUCKETS = (1.0, 2.5, 5.0, 10.0, 20.0, 30.0, 60.0, 120.0, 300.0, 600.0, 1800.0)
+
+
+class NotificationMetrics:
+    """Outcomes n8n reports, and how long notifications took (on the API's clock)."""
+
+    def __init__(self, registry: CollectorRegistry) -> None:
+        self.outcomes = Counter(
+            "aiops_notifications_total",
+            "Notification outcomes reported by n8n, by kind, route and status "
+            "(delivered, suppressed, failed).",
+            ["kind", "route", "status"],
+            registry=registry,
+        )
+        self.alert_to_delivery = Histogram(
+            "aiops_alert_to_notification_seconds",
+            "From receiving the alert (or its resolution) to the channel accepting the "
+            "message: log context, analysis, n8n and the channel together.",
+            ["kind"],
+            buckets=_NOTIFICATION_BUCKETS,
+            registry=registry,
+        )
+        self.channel = Histogram(
+            "aiops_notification_channel_seconds",
+            "From n8n claiming a notification to its outcome: routing and the channel "
+            "call, retries included.",
+            ["channel", "status"],
+            buckets=_NOTIFICATION_BUCKETS,
+            registry=registry,
+        )

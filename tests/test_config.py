@@ -64,6 +64,7 @@ def test_settings_come_from_prefixed_environment(monkeypatch: pytest.MonkeyPatch
         db_password_file=None,
         ingest_token=SecretStr("ingest-token-0123456789"),
         api_token=SecretStr("api-token-0123456789ab"),
+        callback_token=SecretStr("callback-token-0123456789"),
     )
 
     assert settings.log_level == "WARNING"

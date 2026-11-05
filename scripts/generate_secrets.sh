@@ -37,6 +37,18 @@ create_random redis_password
 create_random metrics_token
 create_random ingest_token
 create_random api_token
+create_random callback_token
+create_random n8n_webhook_secret
+
+# The Telegram bot token is yours (from @BotFather): it is only created empty, so the
+# stack starts without Telegram, and it is never overwritten.
+telegram_token="$DIR/telegram_bot_token"
+if [[ -e "$telegram_token" ]]; then
+    echo "kept     $telegram_token"
+else
+    : > "$telegram_token"
+    echo "created  $telegram_token (empty: put your bot token in it, see README)"
+fi
 
 # Redis reads its password from its configuration file, which therefore is a secret too.
 redis_conf="$DIR/redis.conf"

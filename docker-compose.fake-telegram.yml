@@ -1,0 +1,40 @@
+# Fake Telegram Bot API for CI and demos: n8n's Telegram credential points at it, so
+# the whole pipeline runs without a bot, a chat or internet access. It checks the bot
+# token (secrets/telegram_bot_token: any value, as long as n8n uses the same) and
+# Telegram's HTML rules, and records what it was sent:
+#
+#   COMPOSE_FILE=docker-compose.yml:docker-compose.fake-telegram.yml make up smoke SMOKE_ARGS=--telegram
+#   docker compose exec fake-telegram python -c "import urllib.request as u; \
+#       print(u.urlopen('http://127.0.0.1:8081/_test/messages').read().decode())"
+
+services:
+  fake-telegram:
+    image: ${AIOPS_IMAGE:-aiops-n8n-incident-engine:local}
+    command: [python, /opt/fake/fake_telegram_api.py, --port, "8081"]
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    restart: unless-stopped
+    environment:
+      FAKE_TELEGRAM_TOKEN_FILE: /run/secrets/telegram_bot_token
+    secrets: [telegram_bot_token]
+    volumes:
+      - ./scripts/fake_telegram_api.py:/opt/fake/fake_telegram_api.py:ro
+    networks: [backend]
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8081/_test/health', timeout=2)"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    deploy:
+      resources:
+        limits:
+          cpus: "0.25"
+          memory: 64M
+
+  n8n-setup:
+    environment:
+      TELEGRAM_API_BASE_URL: http://fake-telegram:8081
+    depends_on:
+      fake-telegram:
+        condition: service_healthy

@@ -131,7 +131,7 @@ class StreamConsumer:
         topic = fields.get("topic", "")
         handler = self._handlers.get(topic)
         if handler is None:
-            # A topic nobody handles yet (incident.resolved in this phase) is not an error.
+            # A topic this worker does not know (one a newer version added) is not an error.
             await self._ack(message_id, topic, "ignored")
             return
         try:

@@ -34,6 +34,7 @@ ROOT = Path(__file__).resolve().parent.parent
 METRICS_TOKEN = "test-metrics-token-0123456789"
 INGEST_TOKEN = "test-ingest-token-0123456789"
 API_TOKEN = "test-api-token-0123456789abcd"
+CALLBACK_TOKEN = "test-callback-token-0123456789"
 INTEGRATION = os.environ.get("AIOPS_TEST_INTEGRATION") == "1"
 
 TOKENS: dict[str, Any] = {
@@ -43,6 +44,8 @@ TOKENS: dict[str, Any] = {
     "ingest_token_file": None,
     "api_token": SecretStr(API_TOKEN),
     "api_token_file": None,
+    "callback_token": SecretStr(CALLBACK_TOKEN),
+    "callback_token_file": None,
 }
 
 
@@ -123,6 +126,7 @@ async def sessions(migrated: None) -> AsyncIterator[async_sessionmaker[AsyncSess
     engine = create_database_engine(live_settings())
     async with engine.begin() as connection:
         await connection.execute(text("DELETE FROM incident_events"))
+        await connection.execute(text("DELETE FROM notifications"))
         await connection.execute(text("DELETE FROM outbox"))
         await connection.execute(text("DELETE FROM incidents"))
     yield async_sessionmaker(engine, expire_on_commit=False)
@@ -153,6 +157,11 @@ def ingest_headers() -> dict[str, str]:
 @pytest.fixture
 def api_headers() -> dict[str, str]:
     return {"Authorization": f"Bearer {API_TOKEN}"}
+
+
+@pytest.fixture
+def callback_headers() -> dict[str, str]:
+    return {"Authorization": f"Bearer {CALLBACK_TOKEN}"}
 
 
 def pytest_collection_modifyitems(items: list[pytest.Item]) -> None:

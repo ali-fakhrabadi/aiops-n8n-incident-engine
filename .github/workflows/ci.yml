@@ -52,6 +52,14 @@ jobs:
       - name: ShellCheck
         run: shellcheck scripts/*.sh docker/postgres/initdb/*.sh
 
+      - name: n8n workflow is up to date with its code nodes
+        run: python scripts/build_workflow.py --check
+
+      - name: n8n Code node tests (node --test)
+        run: |
+          node --version
+          node --test n8n_workflows/tests/
+
   test:
     name: Tests (PostgreSQL 17, Redis 7)
     runs-on: ubuntu-24.04
@@ -156,16 +164,23 @@ jobs:
     env:
       IMAGE: ghcr.io/${{ github.repository }}
       LOCAL_TAG: aiops-n8n-incident-engine:local
+      # The whole pipeline, Telegram included, against the fake Bot API: no bot, chat
+      # or internet access needed, and Telegram's HTML rules are still enforced.
+      COMPOSE_FILE: docker-compose.yml:docker-compose.fake-telegram.yml
+      TELEGRAM_CHAT_ID: "100000001"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
-      - name: Generate secrets and validate docker-compose.yml
+      - name: Generate secrets and validate the compose files
         run: |
           make env secrets
+          # Any token works with the fake API, as long as n8n gets the same one.
+          printf '%s:%s' 100000001 "$(openssl rand -hex 20)" > secrets/telegram_bot_token
           docker compose config --quiet
           docker compose --profile dev config --quiet
+          COMPOSE_FILE=docker-compose.yml docker compose config --quiet
 
       - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
 
@@ -207,8 +222,8 @@ jobs:
       - name: Start the stack (migrations, API, n8n) and wait for health checks
         run: docker compose up --detach --no-build --wait --wait-timeout 300
 
-      - name: Smoke test
-        run: python3 scripts/smoke_test.py
+      - name: Smoke test (alert to Telegram, retries included)
+        run: python3 scripts/smoke_test.py --fake-telegram
 
       - name: Diagnostics
         if: failure()

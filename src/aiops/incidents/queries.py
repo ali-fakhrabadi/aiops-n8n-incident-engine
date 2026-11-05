@@ -13,7 +13,7 @@ from datetime import datetime
 from sqlalchemy import select, tuple_
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from aiops.incidents.models import Incident, IncidentEvent, IncidentStatus, Severity
+from aiops.incidents.models import Incident, IncidentEvent, IncidentStatus, Notification, Severity
 
 
 class InvalidCursorError(ValueError):
@@ -67,12 +67,24 @@ async def list_incidents(
     return page, encode_cursor(page[-1]) if more else None
 
 
-async def get_incident(
-    session: AsyncSession, incident_id: uuid.UUID
-) -> tuple[Incident, Sequence[IncidentEvent]] | None:
+@dataclass(frozen=True)
+class IncidentRecord:
+    incident: Incident
+    notifications: Sequence[Notification]
+    events: Sequence[IncidentEvent]
+
+
+async def get_incident(session: AsyncSession, incident_id: uuid.UUID) -> IncidentRecord | None:
     incident = await session.get(Incident, incident_id)
     if incident is None:
         return None
+    notifications = (
+        await session.scalars(
+            select(Notification)
+            .where(Notification.incident_id == incident_id)
+            .order_by(Notification.created_at, Notification.id)
+        )
+    ).all()
     events = (
         await session.scalars(
             select(IncidentEvent)
@@ -80,4 +92,4 @@ async def get_incident(
             .order_by(IncidentEvent.id)
         )
     ).all()
-    return incident, events
+    return IncidentRecord(incident, notifications, events)

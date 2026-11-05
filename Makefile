@@ -23,12 +23,19 @@ DEV_RUN := $(COMPOSE) --profile dev run --rm dev
 
 LOCK_IMAGE := python:3.12.15-slim-trixie
 UV_VERSION := 0.13.5
+# Generous network timeouts (seconds) for slow links to the package index.
+LOCK_HTTP_TIMEOUT ?= 180
 UV_COMPILE := /tmp/.local/bin/uv pip compile --quiet --generate-hashes \
 	--python-version 3.12 --python-platform x86_64-unknown-linux-gnu \
 	--custom-compile-command "make lock"
 
+# The image the Code-node tests run in (it has Node.js); .env may override it.
+N8N_IMAGE ?= n8nio/n8n:2.45.6@sha256:45edf89655fd66dd55ea9336c1791ad14777599fdbf6c5aec6db583ede99a40b
+REQUIRED_SECRETS := metrics_token callback_token n8n_webhook_secret telegram_bot_token
+
 .PHONY: help env secrets lock build up down destroy ps logs migrate revision \
-	test lint format typecheck audit ci smoke evaluate
+	test lint format typecheck audit ci smoke evaluate workflow workflow-check \
+	test-workflow n8n-setup telegram-test telegram-chats simulate
 
 help: ## Show this help
 	@awk 'BEGIN {FS = ":.*## "} /^[a-zA-Z0-9_.-]+:.*## / {printf "  \033[36m%-12s\033[0m %s\n", $$1, $$2}' $(MAKEFILE_LIST)
@@ -42,6 +49,8 @@ secrets: ## Generate missing secrets in ./secrets (never overwrites)
 lock: ## Re-resolve and hash-pin requirements*.txt (Python 3.12, Linux)
 	docker run --rm --volume "$(CURDIR):/src" --workdir /src \
 		--user "$(DEV_UID):$(DEV_GID)" --env HOME=/tmp \
+		--env PIP_DEFAULT_TIMEOUT=$(LOCK_HTTP_TIMEOUT) --env UV_HTTP_TIMEOUT=$(LOCK_HTTP_TIMEOUT) \
+		--env UV_HTTP_CONNECT_TIMEOUT=$(LOCK_HTTP_TIMEOUT) --env UV_HTTP_RETRIES=5 \
 		$(if $(PIP_INDEX_URL),--env PIP_INDEX_URL=$(PIP_INDEX_URL) --env UV_DEFAULT_INDEX=$(PIP_INDEX_URL)) \
 		$(LOCK_IMAGE) sh -c '\
 		pip install --quiet --user uv==$(UV_VERSION) && \
@@ -52,8 +61,10 @@ build: ## Build the runtime and dev images
 	$(COMPOSE) build
 	$(COMPOSE) --profile dev build dev
 
-up: ## Build, migrate and start the stack; waits until health checks pass
-	@test -s secrets/metrics_token || { echo "run 'make secrets' first"; exit 1; }
+up: ## Build, migrate, set up n8n and start the stack; waits until health checks pass
+	@for name in $(REQUIRED_SECRETS); do \
+		test -e "secrets/$$name" || { echo "secrets/$$name is missing: run 'make secrets'"; exit 1; }; \
+	done
 	$(COMPOSE) up --detach --build --wait --wait-timeout 300
 
 down: ## Stop the stack (data volumes are kept)
@@ -93,10 +104,39 @@ typecheck: ## Strict mypy
 audit: ## Check locked runtime dependencies for known vulnerabilities
 	$(DEV_RUN) pip-audit --requirement requirements.txt --require-hashes --disable-pip --strict
 
-ci: lint typecheck test audit ## Run the same checks as CI
+ci: lint typecheck test audit workflow-check test-workflow ## Run the same checks as CI
 
-smoke: ## End-to-end checks of the running stack
+smoke: ## End-to-end checks of the running stack (SMOKE_ARGS=--telegram also pages Telegram)
 	python3 scripts/smoke_test.py $(SMOKE_ARGS)
+
+workflow: ## Rebuild the n8n workflow JSON from scripts/build_workflow.py and n8n_workflows/code
+	python3 scripts/build_workflow.py
+
+workflow-check: ## Fail if the committed n8n workflow JSON is out of date
+	python3 scripts/build_workflow.py --check
+
+test-workflow: ## Unit tests of the n8n Code nodes (node --test, in the n8n image)
+	docker run --rm --read-only --network none --user node \
+		--volume "$(CURDIR)/n8n_workflows:/workflows:ro" --entrypoint node \
+		$(N8N_IMAGE) --test /workflows/tests/
+
+n8n-setup: ## Re-import n8n's credentials and workflow (after changing TELEGRAM_*), restart n8n
+	$(COMPOSE) stop n8n
+	$(COMPOSE) run --rm n8n-setup --force
+	$(COMPOSE) up --detach --wait n8n
+
+TELEGRAM_ENV = TELEGRAM_CHAT_ID="$(TELEGRAM_CHAT_ID)" \
+	TELEGRAM_API_BASE_URL="$(TELEGRAM_API_BASE_URL)" \
+	HTTPS_PROXY="$(N8N_HTTPS_PROXY)" NO_PROXY="$(N8N_NO_PROXY)"
+
+telegram-test: ## Check the bot token and TELEGRAM_CHAT_ID, and send one test message
+	$(TELEGRAM_ENV) python3 scripts/telegram_test.py $(TELEGRAM_TEST_ARGS)
+
+telegram-chats: ## List the chats that recently wrote to the bot, with their IDs
+	$(TELEGRAM_ENV) python3 scripts/telegram_test.py --find-chat
+
+simulate: ## Fire a simulated alert and follow it (SCENARIO=disk-full SIMULATE_ARGS="--severity critical")
+	python3 scripts/simulate_alert.py $(SCENARIO) $(SIMULATE_ARGS)
 
 evaluate: ## Run the analysis scenarios (EVAL_ARGS="--analyzer ollama --model llama3.1")
 	docker run --rm --network host --volume "$(CURDIR):/app" --workdir /app \

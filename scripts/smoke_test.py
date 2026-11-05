@@ -20,6 +20,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from http import HTTPStatus
 from pathlib import Path
+from typing import Any
 
 ROOT = Path(__file__).resolve().parent.parent
 COMPOSE = ["docker", "compose", "--project-directory", str(ROOT)]
@@ -67,6 +68,11 @@ def psql_as(role: str, secret: str, database: str, sql: str) -> subprocess.Compl
         text=True,
         check=False,
     )
+
+
+FINAL = {"delivered", "suppressed", "failed"}
+# Two injected Telegram failures, each followed by the Telegram node's 5 s wait.
+RETRY_WAITS = 10
 
 
 class Smoke:
@@ -125,23 +131,27 @@ class Smoke:
         incidents = f"{self.api}/api/v1/incidents"
         if (status := fetch(incidents, headers=self.ingest).status) != HTTPStatus.UNAUTHORIZED:
             return f"incidents with the ingest token: HTTP {status}"
+        report = f"{self.api}/api/v1/notifications/{uuid.uuid4()}/delivery"
+        body = {"status": "processing"}
+        if (status := fetch(report, self.api_auth, "POST", body).status) != HTTPStatus.UNAUTHORIZED:
+            return f"delivery report with the API token: HTTP {status}"
         return None
 
-    def alert_flows_through_the_pipeline(self) -> str | None:
-        """Deliver an alert like Alertmanager does; the worker must pick it up."""
-        now = datetime.now(UTC)
+    def _incident_through_n8n(self, severity: str) -> tuple[dict[str, Any] | None, str]:
+        """Deliver an alert like Alertmanager does and wait until n8n reports back."""
+        alertname = f"SmokeTest{severity.capitalize()}"
         alert = {
             "status": "firing",
-            "labels": {"alertname": "SmokeTest", "severity": "info", "smoke_test": "true"},
+            "labels": {"alertname": alertname, "severity": severity, "smoke_test": "true"},
             "annotations": {"summary": "Delivered by scripts/smoke_test.py"},
-            "startsAt": now.isoformat(),
+            "startsAt": datetime.now(UTC).isoformat(),
             "endsAt": "0001-01-01T00:00:00Z",
             "generatorURL": "",
             "fingerprint": uuid.uuid4().hex[:16],
         }
         delivery = {
             "version": "4",
-            "groupKey": '{}:{alertname="SmokeTest"}',
+            "groupKey": f'{{}}:{{alertname="{alertname}"}}',
             "status": "firing",
             "receiver": "smoke-test",
             "alerts": [alert],
@@ -152,25 +162,115 @@ class Smoke:
             or not isinstance(body := reply.json(), dict)
             or body.get("opened") != 1
         ):
-            return f"delivery: HTTP {reply.status}: {reply.body!r}"
-        listing = fetch(f"{self.api}/api/v1/incidents?alertname=SmokeTest&limit=1", self.api_auth)
-        items = listing.json()["items"] if listing.status == HTTPStatus.OK else []  # type: ignore[index]
-        if not items:
-            return f"incident not listed: HTTP {listing.status}"
-        incident_url = f"{self.api}/api/v1/incidents/{items[0]['id']}"
+            return None, f"delivery: HTTP {reply.status}: {reply.body!r}"
+        listing = fetch(f"{self.api}/api/v1/incidents?alertname={alertname}&limit=1", self.api_auth)
+        page: Any = listing.json() if listing.status == HTTPStatus.OK else {"items": []}
+        if not page["items"]:
+            return None, f"incident not listed: HTTP {listing.status}"
+        incident_url = f"{self.api}/api/v1/incidents/{page['items'][0]['id']}"
         deadline = time.monotonic() + self.pipeline_timeout
+        detail: Any = None
         while time.monotonic() < deadline:
             detail = fetch(incident_url, self.api_auth).json()
-            if isinstance(detail, dict) and detail.get("analysis_status") != "pending":
-                kinds = [event["kind"] for event in detail["events"]]
-                expected = ["opened", "context_collected", "analysis_completed"]
-                return None if kinds == expected else f"timeline {kinds}, expected {expected}"
+            if any(item["status"] in FINAL for item in detail["notifications"]):
+                return detail, ""
             time.sleep(0.5)
-        return f"the worker did not process the incident within {self.pipeline_timeout:.0f} s"
+        state = (
+            f"analysis {detail['analysis_status']}, notifications {detail['notifications']}"
+            if detail
+            else "no detail"
+        )
+        return None, f"no delivery report within {self.pipeline_timeout:.0f} s ({state})"
+
+    @staticmethod
+    def _timeline_problem(detail: dict[str, Any], outcome: str) -> str | None:
+        kinds = [event["kind"] for event in detail["events"]]
+        # The worker records the hand-off and n8n reports the outcome concurrently.
+        expected = ["opened", "context_collected", "analysis_completed"]
+        if kinds[:3] != expected or sorted(kinds[3:]) != sorted(["notification_sent", outcome]):
+            return f"timeline {kinds}"
+        return None
+
+    def alert_flows_through_the_pipeline(self) -> str | None:
+        """Info alerts go all the way through n8n, which records them without sending."""
+        detail, problem = self._incident_through_n8n("info")
+        if detail is None:
+            return problem
+        notification = detail["notifications"][0]
+        if (notification["status"], notification["route"]) != ("suppressed", "suppress"):
+            return f"notification {notification}"
+        return self._timeline_problem(detail, "notification_suppressed")
+
+    def critical_alert_reaches_telegram(self) -> str | None:
+        detail, problem = self._incident_through_n8n("critical")
+        if detail is None:
+            return problem
+        notification = detail["notifications"][0]
+        if notification["status"] != "delivered" or not notification["channel_message_id"]:
+            return f"notification {notification}"
+        if notification["route"] != "page":
+            return f"routed to {notification['route']}, expected page"
+        return self._timeline_problem(detail, "notification_delivered")
+
+    @staticmethod
+    def _fake_telegram(path: str, body: object | None = None) -> Any:
+        """Call the fake Bot API's test endpoints, from inside its container."""
+        script = (
+            "import sys, urllib.request as u; data = sys.stdin.read().encode() or None; "
+            f"request = u.Request('http://127.0.0.1:8081{path}', data=data, "
+            "headers={'Content-Type': 'application/json'}); "
+            "print(u.urlopen(request, timeout=10).read().decode())"
+        )
+        result = subprocess.run(
+            [*COMPOSE, "exec", "-T", "fake-telegram", "python", "-c", script],
+            input="" if body is None else json.dumps(body),
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        return json.loads(result.stdout)
+
+    def fake_telegram_got_a_valid_page(self) -> str | None:
+        """The page from the previous check, as the fake Bot API (Telegram's rules) saw it."""
+        messages = self._fake_telegram("/_test/messages")["messages"]
+        pages = [message for message in messages if "SmokeTestCritical" in message["text"]]
+        if not pages:
+            return f"no message about SmokeTestCritical among {len(messages)}"
+        last = pages[-1]
+        if last["parse_mode"] != "HTML" or last["disable_notification"]:
+            return f"parse_mode {last['parse_mode']}, silent {last['disable_notification']}"
+        return None
+
+    def telegram_failures_are_retried(self) -> str | None:
+        """The fake Bot API fails twice (502); n8n's retries still deliver the page."""
+        self._fake_telegram("/_test/faults", {"status": 502, "count": 2})
+        detail, problem = self._incident_through_n8n("critical")
+        if detail is None:
+            return problem
+        if detail["notifications"][0]["status"] != "delivered":
+            return f"notification {detail['notifications'][0]}"
+        [delivered] = [e for e in detail["events"] if e["kind"] == "notification_delivered"]
+        seconds = delivered["details"]["seconds_in_channel"]
+        return None if seconds >= RETRY_WAITS else f"delivered after {seconds} s: no retries?"
 
     def n8n_ready(self) -> str | None:
         reply = fetch(f"{self.n8n}/healthz/readiness")
         return None if reply.status == HTTPStatus.OK else f"HTTP {reply.status}"
+
+    def n8n_webhook_needs_a_signed_token(self) -> str | None:
+        """The workflow is published (404 otherwise) and refuses unsigned requests."""
+        url = f"{self.n8n}/webhook/aiops-incident"
+        unsigned = fetch(url, method="POST", body={"payload": "{}"})
+        forged = fetch(
+            url,
+            headers={"Authorization": "Bearer eyJhbGciOiJIUzI1NiJ9.e30.c2lnbmF0dXJl"},
+            method="POST",
+            body={"payload": "{}"},
+        )
+        refused = {HTTPStatus.UNAUTHORIZED, HTTPStatus.FORBIDDEN}
+        if unsigned.status not in refused or forged.status not in refused:
+            return f"unsigned: HTTP {unsigned.status}, forged: HTTP {forged.status}"
+        return None
 
     def internal_services_not_published(self) -> str | None:
         published = []
@@ -214,8 +314,20 @@ def main() -> int:
     parser.add_argument(
         "--pipeline-timeout",
         type=float,
-        default=20,
-        help="seconds to wait for the analysis (a CPU-only LLM needs a few minutes)",
+        default=30,
+        help="seconds to wait for n8n's report (a CPU-only LLM needs a few minutes)",
+    )
+    parser.add_argument(
+        "--telegram",
+        action="store_true",
+        help="also send a critical alert and expect Telegram to accept the message "
+        "(on a real chat this sends a real message)",
+    )
+    parser.add_argument(
+        "--fake-telegram",
+        action="store_true",
+        help="--telegram against docker-compose.fake-telegram.yml, plus its checks: the "
+        "message as Telegram would parse it, and retries after injected failures",
     )
     args = parser.parse_args()
 
@@ -225,12 +337,33 @@ def main() -> int:
         ("API readiness: PostgreSQL and migrations at head", smoke.api_readiness),
         ("Errors are problem+json and carry the request ID", smoke.problem_details),
         ("Metrics require the bearer token", smoke.metrics_protected),
-        ("Alert delivery and incident API need their own tokens", smoke.tokens_are_separate),
         (
-            "An alert flows API -> outbox -> stream -> log context -> analysis",
-            smoke.alert_flows_through_the_pipeline,
+            "Alert delivery, incident API and delivery reports need their own tokens",
+            smoke.tokens_are_separate,
         ),
         ("n8n ready (its database reachable)", smoke.n8n_ready),
+        (
+            "n8n's incident webhook is published and refuses unsigned requests",
+            smoke.n8n_webhook_needs_a_signed_token,
+        ),
+        (
+            "An info alert flows API -> worker -> analysis -> n8n, recorded without sending",
+            smoke.alert_flows_through_the_pipeline,
+        ),
+    ]
+    if args.telegram or args.fake_telegram:
+        checks.append(
+            (
+                "A critical alert pages on-call through Telegram",
+                smoke.critical_alert_reaches_telegram,
+            )
+        )
+    if args.fake_telegram:
+        checks += [
+            ("Telegram got valid HTML, with sound", smoke.fake_telegram_got_a_valid_page),
+            ("Telegram failures are retried by n8n", smoke.telegram_failures_are_retried),
+        ]
+    checks += [
         (
             "PostgreSQL and Redis are not published on the host",
             smoke.internal_services_not_published,

@@ -28,7 +28,7 @@ from aiops.incidents.models import (
     IncidentEvent,
     OutboxMessage,
 )
-from aiops.incidents.topics import TOPIC_CONTEXT_READY, TOPIC_OPENED
+from aiops.incidents.topics import TOPIC_ANALYZED, TOPIC_CONTEXT_READY, TOPIC_OPENED
 from aiops.logcontext.loki import LokiClient, LokiQueryError
 from aiops.logcontext.redaction import redact
 from aiops.logcontext.selectors import selector_for
@@ -267,6 +267,11 @@ class AnalyzeIncident:
                 else EventKind.ANALYSIS_FAILED
             )
             session.add(IncidentEvent(incident_id=incident_id, kind=kind, details=details))
+            # Next stage, in the same transaction: a failed analysis is still worth a
+            # message (the alert itself, without a probable cause).
+            session.add(
+                OutboxMessage(topic=TOPIC_ANALYZED, payload={"incident_id": str(incident_id)})
+            )
         provider = str(analysis.get("provider", "unknown"))
         self._metrics.analyses.labels(provider, status.value).inc()
         if status == AnalysisStatus.COMPLETED:

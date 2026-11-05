@@ -9,11 +9,13 @@ for a probable root cause and **safe, read-only diagnostic commands**, and route
 to the right channel by severity. Everything runs on one Linux host; with Ollama, no
 alert or log line leaves it.
 
-> **Status: phase 3 of 5.** Alertmanager deliveries become idempotent incidents with a
+> **Status: phase 4 of 5.** Alertmanager deliveries become idempotent incidents with a
 > timeline; a worker fed through a transactional outbox and Redis Streams collects the
-> redacted Loki log lines around each incident and has an LLM (or a deterministic mock)
-> analyse it, with every answer checked before it is stored. The n8n workflow follows in
-> the next phase; see the [roadmap](#roadmap).
+> redacted Loki log lines around each incident, has an LLM (or a deterministic mock)
+> analyse it with every answer checked before it is stored, and hands the result to an
+> n8n workflow over a signed webhook. n8n routes it by severity to Telegram and reports
+> every delivery back. Measured results follow in the last phase; see the
+> [roadmap](#roadmap).
 
 ## Architecture
 
@@ -21,19 +23,21 @@ alert or log line leaves it.
 flowchart LR
     am["Alertmanager"] -->|webhook, ingest token| api
     subgraph host["Single Linux host (Docker Compose)"]
-        api["API (FastAPI)<br/>validate, dedupe"] -->|one transaction| pg[("PostgreSQL<br/>incidents, timeline,<br/>outbox")]
+        api["API (FastAPI)<br/>validate, dedupe"] -->|one transaction| pg[("PostgreSQL<br/>incidents, timeline,<br/>outbox, notifications")]
         pg -->|relay| q[["Redis stream<br/>consumer group"]]
-        q --> worker["Worker<br/>log context, analysis"]
+        q --> worker["Worker<br/>log context, analysis,<br/>hand-off"]
         worker -->|LogQL, read-only| loki["Loki"]
         worker -->|prompt, JSON schema| llm["Ollama / OpenAI / mock"]
-        worker -.->|phase 4, signed| n8n["n8n<br/>route by severity"]
-        n8n -.-> ch["Telegram / Slack / e-mail"]
+        worker -->|signed webhook| n8n["n8n<br/>verify, claim,<br/>route by severity"]
+        n8n -->|claim, delivery report,<br/>callback token| api
     end
-    ops["Operators, n8n"] -->|API token| api
+    n8n -->|Bot API| tg["Telegram"]
+    ops["Operators"] -->|API token| api
 ```
 
-* **The API owns correctness**: validation, idempotency and incident state. **n8n will
-  own routing**, where it is easiest to change: which channel, which format, who is on call.
+* **The API owns correctness**: validation, idempotency, incident and delivery state.
+  **n8n owns routing**, where it is easiest to change: which channel, which format, who
+  is woken up.
 * **LLM output is advice, never action.** Nothing is executed. Suggested commands must
   pass an allowlist of read-only diagnostics, and logs are treated as untrusted input.
 
@@ -48,7 +52,7 @@ replica), so every delivery is safe to apply again:
 |---|---|
 | A new alert, firing | Incident opened, `opened` on the timeline, `incident.opened` queued for the worker |
 | The same alert again (repeat, retry, other replica) | Same incident: `last_received_at` and `notification_count` move, nothing else |
-| The alert resolves | Status `resolved`, end time and duration recorded, `incident.resolved` queued |
+| The alert resolves | Status `resolved`, end time and duration recorded, `incident.resolved` queued for the all-clear |
 | A late firing delivery for a resolved incident | Ignored for the status: a resolved incident is never reopened |
 | The alert fires again later | A new start time, so a new incident |
 | Already resolved on first sight | Recorded as resolved; nothing to investigate |
@@ -176,6 +180,111 @@ host and its Docker networks, or the Docker bridge address). Keep `claim_idle_se
 (600 s) above `llm_timeout_seconds` (300 s) so a second worker never claims an analysis
 that is still running.
 
+## Notifications through n8n
+
+Once the analysis is stored (or has failed: the alert alone is still worth a message),
+the worker hands the incident to the n8n workflow
+[`n8n_workflows/aiops_incident_routing.json`](n8n_workflows/aiops_incident_routing.json).
+Each incident gets at most two messages: the firing one with the analysis, and an
+all-clear when the alert resolves. When it resolves before the analysis is done, the
+firing message says so and no all-clear follows; that decision is taken under a lock on
+the incident row, so the two can never both be skipped or both be sent.
+
+```mermaid
+flowchart LR
+    wh["Incident webhook<br/>JWT check"] --> st["Settings"] --> vf["Verify signed payload<br/>(Code)"] --> ok{"Valid?"}
+    ok -->|no| rj["Reject 400"]
+    ok -->|yes| ac["Accept 202"] --> cl["Claim delivery<br/>(engine API)"] --> cd{"Claimed?"}
+    cd -->|"409: already claimed"| stop["Stop"]
+    cd -->|yes| fm["Format message<br/>(Code)"] --> sw{"Route by severity<br/>(Switch)"}
+    sw -->|page| tp["Telegram: page on-call"]
+    sw -->|quiet| tq["Telegram: quiet"]
+    sw -->|suppress| out
+    tp & tq -->|answer or error| out["Delivery outcome<br/>(Code)"] --> rp["Report delivery<br/>(engine API)"]
+```
+
+**A signed webhook.** The body is `{"payload": "<JSON text>"}`; the `Authorization`
+header carries an HS256 JSON Web Token whose claims name the issuer, the audience, the
+incident (`sub`) and the notification (`jti`), expire after five minutes and include the
+SHA-256 of the payload text. n8n's Webhook node checks the signature and expiry with a
+JWT credential (encrypted in n8n's database); the first Code node checks the hash and the
+IDs. A token is useless with any other body, and gone within minutes. The payload travels
+as a string so the hash covers the exact bytes that were signed. Only checked output
+leaves the engine: commands that passed the allowlist and evidence found in the logs.
+
+**Delivered once.** Before sending, n8n claims the notification at the engine; a second
+claim gets 409 and the execution stops. So when the worker repeats a webhook (because
+n8n's answer was lost, say), nobody gets the message twice. Then n8n reports the outcome:
+`delivered` with Telegram's message ID, `failed` with the reason, or `suppressed`. The
+engine stores it with the incident and its timeline, and measures how long it took.
+
+**Routing** (the Switch node, rules in [format_message.js](n8n_workflows/code/format_message.js)):
+
+| Alert | Route | Telegram |
+|---|---|---|
+| `critical`, firing, not flapping | `page` | A message with sound |
+| any other `critical` or `warning` (resolved, flapping) | `quiet` | A silent message |
+| `info`, `none`, unknown | `suppress` | Nothing; recorded as suppressed |
+
+**The message** (HTML) carries the severity, the alert, where it fires, the probable
+cause with its confidence and source, the read-only checks, evidence and next steps, and
+the incident ID. Everything taken from the payload is escaped (alert labels, log quotes
+and model output can contain anything, including markup meant to fake a message or hide
+a link), and the least important sections are dropped first to stay under Telegram's
+4,096 characters. The Code nodes are unit-tested with `node --test`
+([n8n_workflows/tests](n8n_workflows/tests)), escaping of hostile input included.
+
+**Retries, end to end:**
+
+| Hop | On failure |
+|---|---|
+| Worker to n8n | 3 attempts, 2 s then 4 s apart, each signed afresh; then the stream message is retried (`claim_idle_seconds`) up to `max_deliveries` times, and the notification is recorded as failed. A 400 or 403 (signature, payload) fails it at once |
+| n8n to Telegram | The Telegram node has no timeout setting of its own: n8n's HTTP client waits up to five minutes for an answer, so a slow link is waited out rather than cut off. Errors are retried 3 times, 5 s apart (n8n's longest wait between tries), then reported as `failed` |
+| n8n to the engine | The claim 3 times, the report 5 times, a few seconds apart |
+
+**Metrics.** The worker counts hand-offs by kind and outcome
+(`aiops_notification_handoffs_total`, `aiops_notification_handoff_seconds`); the API
+counts reported outcomes by kind, route and status (`aiops_notifications_total`) and
+measures, on its own clock, alert to delivered message
+(`aiops_alert_to_notification_seconds`) and claim to outcome, the time n8n and Telegram
+took with retries (`aiops_notification_channel_seconds`). `make simulate` prints the same
+timings for one alert as it happens.
+
+The workflow is generated: its Code nodes live in [n8n_workflows/code](n8n_workflows/code)
+and [scripts/build_workflow.py](scripts/build_workflow.py) assembles the import-ready JSON
+(`make workflow`); CI fails when the committed JSON is out of date. To import it by hand
+instead, create the three credentials it names and set the chat ID in its *Settings* node.
+
+### Telegram setup
+
+Anyone can use their own bot and chat; nothing about them is in the repository.
+
+1. Create a bot with [@BotFather](https://t.me/BotFather) and write its token into
+   `secrets/telegram_bot_token` with an editor (one line; `make secrets` created the file
+   empty). It never goes into `.env`, the environment or Git.
+2. Start a chat with the bot (or add it to a group, or as an administrator to a channel),
+   send it a message, and run `make telegram-chats`: it lists the chats that wrote to the
+   bot, with their IDs.
+3. Put the ID into `TELEGRAM_CHAT_ID` in `.env`: a user, a group (negative ID) or a
+   channel (`-100…` or `@channelname`).
+4. `make telegram-test`: checks the token (`getMe`) and the chat (`getChat`) and sends one
+   test message, printing how long each call took. Calls get 45 s and up to four
+   attempts with exponential back-off.
+5. `make up` sets n8n up on its first start; on a running stack, `make n8n-setup` applies
+   changed settings (n8n restarts).
+
+Optional: `TELEGRAM_API_BASE_URL` for a self-hosted Bot API server, and
+`N8N_HTTPS_PROXY` (with extra `N8N_NO_PROXY` hosts) when Telegram is only reachable
+through a proxy; it must be reachable from the container, e.g.
+`http://host.docker.internal:20171` for one on the host. n8n applies the proxy to every
+request, so the internal services are always exempt. n8n's SSRF protection is on: if
+your DNS answers with private or "fake" addresses (`198.18.0.0/15`, as some proxies do),
+add the Bot API host to `N8N_SSRF_ALLOWED_HOSTNAMES`.
+
+**Without a bot**, `docker-compose.fake-telegram.yml` replaces Telegram with a fake Bot
+API that checks the token and Telegram's HTML rules, records the messages, and can be told
+to fail or be slow. CI runs the whole pipeline against it, n8n's retries included.
+
 ## API
 
 Interactive documentation: `/docs` (OpenAPI). Every error is an RFC 9457
@@ -185,13 +294,15 @@ Interactive documentation: `/docs` (OpenAPI). Every error is an RFC 9457
 |---|---|---|
 | `POST /api/v1/alerts/alertmanager` | ingest | Alertmanager webhook (version 4); body limit 1 MiB, 500 alerts |
 | `GET /api/v1/incidents` | API | Newest first; filters `status`, `severity`, `alertname`, `flapping`; cursor pagination |
-| `GET /api/v1/incidents/{id}` | API | Incident with labels, annotations, timeline, log context and analysis |
+| `GET /api/v1/incidents/{id}` | API | Incident with labels, annotations, log context, analysis, notifications and timeline |
+| `POST /api/v1/notifications/{id}/delivery` | callback | n8n claims a notification (`processing`), then reports `delivered`, `failed` or `suppressed`; idempotent, 409 on a second claim |
 | `GET /health/live`, `/health/ready` | none | Process alive; PostgreSQL reachable and schema at the migration head |
 | `GET /metrics` | metrics | Prometheus metrics of the API |
 
 Each caller class has its own token (`secrets/ingest_token`, `api_token`,
-`metrics_token`): Alertmanager can only deliver, Prometheus can only scrape, and a
-leaked token exposes one capability. Alertmanager reads its token from a file:
+`callback_token`, `metrics_token`): Alertmanager can only deliver, operators read, n8n
+can only report deliveries, Prometheus can only scrape, and a leaked token exposes one
+capability. Alertmanager reads its token from a file:
 
 ```yaml
 receivers:
@@ -205,7 +316,8 @@ receivers:
 ```
 
 The worker exposes its own metrics on port 9101 inside the Compose network: messages by
-topic and outcome, handling time, outbox events published, log collections by result.
+topic and outcome, handling time, outbox events published, log collections, analyses
+and notification hand-offs by result.
 
 ## Security baseline
 
@@ -222,8 +334,18 @@ topic and outcome, handling time, outbox events published, log collections by re
 * **Untrusted input stays bounded**: request bodies over 1 MiB are refused even when sent
   chunked, label and annotation sizes are capped, unknown query parameters are rejected,
   and validation errors never echo the input.
-* **n8n stays private**: telemetry, update checks, the template gallery and community
-  packages are off, and workflows cannot read the container environment.
+* **n8n stays private**: telemetry, update checks, the template gallery, community
+  packages and the MCP server registry (it polls api.n8n.io) are off, workflows cannot
+  read the container environment, Code nodes may
+  load `crypto` and nothing else, and SSRF protection lets workflow requests reach public
+  hosts and, of the private addresses, only the engine's API. Its credentials (the webhook key, the callback token,
+  the bot token) are built from `./secrets` by a one-shot setup container, handed to n8n's
+  CLI through a file on tmpfs, and stored encrypted; the workflow itself holds no secret.
+  Code nodes run in n8n's task runner in internal mode, which n8n 2.45 marks as
+  deprecated in favour of a separate runner container (`n8nio/runners`); moving to that
+  is a planned change.
+* **Signed, single-use webhooks** between the engine and n8n, and a callback token that
+  can do nothing but report deliveries (see [Notifications](#notifications-through-n8n)).
 * **Supply chain**: hash-pinned dependencies (direct ones at least a week old when
   chosen), digest-pinned n8n image, actions pinned to commit SHAs, Dependabot.
 
@@ -233,9 +355,17 @@ Requirements: Docker with Compose v2, GNU make, bash, openssl, python3.
 
 ```bash
 make env secrets     # .env with defaults, generated secrets in ./secrets
-make up              # build, migrate, start; waits for health checks
+make up              # build, migrate, set up n8n, start; waits for health checks
 make smoke           # end-to-end checks, including one alert through the whole pipeline
+make simulate SCENARIO=disk-full SIMULATE_ARGS="--severity critical"
 ```
+
+Telegram is optional for a first run: without a bot token and chat ID the pipeline
+still runs and records each Telegram delivery as failed. See
+[Telegram setup](#telegram-setup), or try it all with the fake Bot API:
+`COMPOSE_FILE=docker-compose.yml:docker-compose.fake-telegram.yml` in `.env`, any token
+in `secrets/telegram_bot_token`, any numeric `TELEGRAM_CHAT_ID`, then
+`make up smoke SMOKE_ARGS=--fake-telegram`.
 
 | Service | URL |
 |---|---|
@@ -261,9 +391,15 @@ joins that stack's network. For any other Loki, set `AIOPS_LOKI_URL`.
 | `make lock` | Re-resolve and hash-pin `requirements*.txt` (`PIP_INDEX_URL` for a mirror) |
 | `make revision MESSAGE="..."` | Autogenerate an Alembic migration |
 | `make evaluate` | Run the analysis scenarios (`EVAL_ARGS="--analyzer ollama --model llama3.1"`) |
+| `make workflow` / `make workflow-check` | Regenerate the n8n workflow JSON / fail if it is out of date |
+| `make test-workflow` | Unit tests of the n8n Code nodes (`node --test`, in the n8n image) |
+| `make simulate` | Fire one of the evaluation alerts at the stack and follow it to the message |
+| `make telegram-test` / `make telegram-chats` | Check the bot and chat and send a test message / list chat IDs |
+| `make n8n-setup` | Re-import n8n's credentials and workflow, then restart n8n |
 
-189 tests, 97% branch coverage; CI also checks that the models and migrations agree
-(`alembic check`) and runs the smoke test against the full stack.
+230 Python tests with 97% branch coverage, and 13 Code-node tests; CI also checks that
+the models and migrations agree (`alembic check`) and runs the smoke test against the
+full stack, from an alert to a (fake) Telegram message, retries included.
 
 ## Roadmap
 
@@ -275,11 +411,12 @@ joins that stack's network. For any other Loki, set `AIOPS_LOKI_URL`.
 3. **AI root-cause analysis** (done): Ollama, OpenAI and mock analysers over the collected
    context, validated structured output, command safety policy, prompt-injection
    defences.
-4. **n8n workflow and Telegram**: import-ready workflow (Webhook, Code, Switch, Telegram nodes),
-   signed webhooks, delivery callbacks, `scripts/simulate_alert.py`, Alertmanager of the
-   observability stack wired in.
-5. **Measured results**: end-to-end latency and analysis quality on real fault drills,
-   screenshots and final documentation.
+4. **n8n workflow and Telegram** (done): import-ready workflow (Webhook, Code, Switch,
+   Telegram nodes) set up automatically, signed webhooks, claim and delivery reports,
+   fake Bot API for CI, `scripts/simulate_alert.py`, `make telegram-test`.
+5. **Measured results**: the observability stack's Alertmanager wired in, end-to-end
+   latency and analysis quality on real fault drills, screenshots and final
+   documentation.
 
 ## License
 

@@ -10,6 +10,9 @@ pytest-asyncio==1.4.0
 pytest-cov==7.1.0
 # Mocks httpx transports: Loki answers in tests without a Loki.
 respx==0.23.1
+# Test oracle only: the webhook tokens the engine builds must verify with a standard
+# JWT library (n8n verifies them with jsonwebtoken).
+pyjwt==2.15.1
 
 ruff==0.17.1
 mypy==2.4.0

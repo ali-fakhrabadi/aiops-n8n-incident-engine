@@ -9,6 +9,7 @@ from prometheus_client import CollectorRegistry
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 from aiops.config import Settings
+from aiops.metrics import NotificationMetrics
 
 
 def get_settings(request: Request) -> Settings:
@@ -17,6 +18,10 @@ def get_settings(request: Request) -> Settings:
 
 def get_registry(request: Request) -> CollectorRegistry:
     return cast("CollectorRegistry", request.app.state.registry)
+
+
+def get_notification_metrics(request: Request) -> NotificationMetrics:
+    return cast("NotificationMetrics", request.app.state.notification_metrics)
 
 
 def get_engine(request: Request) -> AsyncEngine:

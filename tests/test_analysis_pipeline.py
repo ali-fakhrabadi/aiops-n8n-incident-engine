@@ -99,7 +99,11 @@ async def test_an_incident_goes_from_alert_to_analysis(make_pipeline: MakePipeli
         "context_collected",
         "analysis_completed",
     ]
-    assert await pipeline.outbox_topics() == ["incident.opened", "incident.context_ready"]
+    assert await pipeline.outbox_topics() == [
+        "incident.opened",
+        "incident.context_ready",
+        "incident.analyzed",
+    ]
     assert pipeline.counter("aiops_analyses_total", provider="mock", status="completed") == 1
 
 

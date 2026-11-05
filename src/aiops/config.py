@@ -15,6 +15,7 @@ from pydantic import Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 MIN_TOKEN_LENGTH = 16
+MIN_SIGNING_KEY_LENGTH = 32
 
 
 def _read_secret_file(path: Path, setting: str) -> str:
@@ -104,6 +105,7 @@ class Settings(RuntimeSettings):
         "metrics_token",
         "ingest_token",
         "api_token",
+        "callback_token",
     )
 
     # Bearer token Prometheus presents to scrape /metrics.
@@ -112,9 +114,12 @@ class Settings(RuntimeSettings):
     # Bearer token Alertmanager presents to deliver alerts.
     ingest_token: SecretStr
     ingest_token_file: Path | None = None
-    # Bearer token for the incident API (operators, n8n).
+    # Bearer token for reading incidents (operators, dashboards).
     api_token: SecretStr
     api_token_file: Path | None = None
+    # Bearer token n8n presents to report deliveries; it can do nothing else.
+    callback_token: SecretStr
+    callback_token_file: Path | None = None
 
     readiness_timeout_seconds: float = Field(default=2.0, gt=0, le=30)
     max_request_bytes: int = Field(default=1_048_576, ge=1024)
@@ -124,7 +129,7 @@ class Settings(RuntimeSettings):
     flap_threshold: int = Field(default=3, ge=2)
     flap_window_minutes: int = Field(default=60, ge=1)
 
-    @field_validator("metrics_token", "ingest_token", "api_token")
+    @field_validator("metrics_token", "ingest_token", "api_token", "callback_token")
     @classmethod
     def _long_enough(cls, value: SecretStr) -> SecretStr:
         if len(value.get_secret_value()) < MIN_TOKEN_LENGTH:
@@ -136,7 +141,12 @@ class Settings(RuntimeSettings):
 class WorkerSettings(RuntimeSettings):
     """Settings of the worker process (outbox relay and stream consumer)."""
 
-    secret_fields: ClassVar[tuple[str, ...]] = ("db_password", "redis_password", "openai_api_key")
+    secret_fields: ClassVar[tuple[str, ...]] = (
+        "db_password",
+        "redis_password",
+        "openai_api_key",
+        "n8n_webhook_secret",
+    )
 
     # Root-cause analysis. "mock" is deterministic and needs no model (CI, demos);
     # "ollama" keeps every alert and log line on this host; "openai" is any
@@ -162,6 +172,20 @@ class WorkerSettings(RuntimeSettings):
     loki_max_lines: int = Field(default=200, ge=1, le=5000)
     loki_max_line_length: int = Field(default=2000, ge=100, le=65_536)
 
+    # Notifications: n8n's webhook for the incident routing workflow; empty disables
+    # them. Requests carry an HS256 token signed with the webhook secret, which n8n
+    # keeps as a JWT credential.
+    n8n_webhook_url: str | None = None
+    n8n_webhook_secret: SecretStr | None = None
+    n8n_webhook_secret_file: Path | None = None
+    # n8n answers once it has checked the signature, before it calls the channel.
+    n8n_timeout_seconds: float = Field(default=10.0, gt=0, le=120)
+    # Attempts per stream delivery, with exponential back-off between them; after
+    # that the message is retried like any other (claim_idle_seconds).
+    n8n_attempts: int = Field(default=3, ge=1, le=10)
+    n8n_backoff_seconds: float = Field(default=2.0, ge=0, le=60)
+    notification_token_ttl_seconds: int = Field(default=300, ge=30, le=3600)
+
     relay_poll_seconds: float = Field(default=0.5, gt=0, le=60)
     relay_batch_size: int = Field(default=100, ge=1, le=1000)
     read_block_ms: int = Field(default=2000, ge=100, le=60_000)
@@ -175,10 +199,19 @@ class WorkerSettings(RuntimeSettings):
     metrics_port: int = Field(default=9101, ge=0, le=65535)
     heartbeat_file: Path = Path("/tmp/aiops-worker-heartbeat")  # noqa: S108 - tmpfs in the container
 
-    @field_validator("loki_url")
+    @field_validator("loki_url", "n8n_webhook_url")
     @classmethod
     def _optional_http_url(cls, value: str | None) -> str | None:
         return _http_url(value) if value else None
+
+    @field_validator("n8n_webhook_secret")
+    @classmethod
+    def _strong_secret(cls, value: SecretStr | None) -> SecretStr | None:
+        # HS256 keys shorter than the hash output weaken the signature (RFC 7518 3.2).
+        if value is not None and len(value.get_secret_value()) < MIN_SIGNING_KEY_LENGTH:
+            msg = f"must be at least {MIN_SIGNING_KEY_LENGTH} characters"
+            raise ValueError(msg)
+        return value
 
     @field_validator("ollama_url", "openai_base_url")
     @classmethod
@@ -189,6 +222,9 @@ class WorkerSettings(RuntimeSettings):
     def _analyzer_is_configured(self) -> WorkerSettings:
         if self.analyzer == "openai" and self.openai_api_key is None:
             msg = "analyzer 'openai' needs openai_api_key (or openai_api_key_file)"
+            raise ValueError(msg)
+        if self.n8n_webhook_url and self.n8n_webhook_secret is None:
+            msg = "n8n_webhook_url needs n8n_webhook_secret (or n8n_webhook_secret_file)"
             raise ValueError(msg)
         return self
 

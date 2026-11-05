@@ -23,6 +23,7 @@ from aiops.incidents.schemas import (
     IncidentEventOut,
     IncidentPage,
     IncidentSummary,
+    NotificationOut,
 )
 
 router = APIRouter(
@@ -70,7 +71,7 @@ async def list_(sessions: Sessions, query: Annotated[IncidentListQuery, Query()]
 
 @router.get(
     "/{incident_id}",
-    summary="One incident with its timeline and collected log context",
+    summary="One incident: log context, analysis, notifications and timeline",
     responses={status.HTTP_404_NOT_FOUND: {"description": "No such incident"}},
 )
 async def detail(incident_id: uuid.UUID, sessions: Sessions) -> IncidentDetail:
@@ -78,7 +79,7 @@ async def detail(incident_id: uuid.UUID, sessions: Sessions) -> IncidentDetail:
         found = await get_incident(session, incident_id)
     if found is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, detail="No such incident.")
-    incident, events = found
+    incident = found.incident
     summary = IncidentSummary.model_validate(incident)
     return IncidentDetail(
         **summary.model_dump(),
@@ -89,5 +90,6 @@ async def detail(incident_id: uuid.UUID, sessions: Sessions) -> IncidentDetail:
         context_updated_at=incident.context_updated_at,
         analysis=incident.analysis,
         analysis_updated_at=incident.analysis_updated_at,
-        events=[IncidentEventOut.model_validate(event) for event in events],
+        notifications=[NotificationOut.model_validate(item) for item in found.notifications],
+        events=[IncidentEventOut.model_validate(event) for event in found.events],
     )

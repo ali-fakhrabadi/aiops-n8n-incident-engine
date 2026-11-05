@@ -13,7 +13,14 @@ this directory except this file is ignored by Git.
 | `redis_password`, `redis.conf` | Redis authentication (the config file carries the password) |
 | `metrics_token` | Bearer token Prometheus presents to scrape the API's `/metrics` |
 | `ingest_token` | Bearer token Alertmanager presents to deliver alerts |
-| `api_token` | Bearer token for reading incidents (operators, n8n) |
+| `api_token` | Bearer token for reading incidents (operators, dashboards) |
+| `callback_token` | Bearer token n8n presents to report deliveries; good for nothing else |
+| `n8n_webhook_secret` | HS256 key the worker signs webhooks to n8n with (n8n keeps it as a JWT credential) |
+| `telegram_bot_token` | **Yours**: the token from @BotFather. Created empty, never overwritten |
 
 Keep a backup of `n8n_encryption_key`: credentials stored in n8n cannot be decrypted
 without it.
+
+To use Telegram, write the bot token into `telegram_bot_token` (one line, nothing
+else) with an editor, so it never lands in your shell history, and keep the file
+readable for your user only, like the rest of this directory.

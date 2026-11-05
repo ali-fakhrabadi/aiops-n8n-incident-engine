@@ -62,6 +62,24 @@ class AnalysisStatus(StrEnum):
     SKIPPED = "skipped"  # nothing to analyse (resolved on arrival)
 
 
+class NotificationKind(StrEnum):
+    FIRING = "firing"  # sent once the analysis is done (or has failed)
+    RESOLVED = "resolved"  # the all-clear, unless the firing message already reported it
+
+
+class NotificationStatus(StrEnum):
+    PENDING = "pending"  # recorded; the worker is handing it to n8n
+    PROCESSING = "processing"  # n8n claimed it and is sending it
+    DELIVERED = "delivered"  # the channel accepted the message
+    SUPPRESSED = "suppressed"  # n8n's routing decided not to send it
+    FAILED = "failed"  # n8n or the channel kept failing
+
+
+FINAL_NOTIFICATION_STATUSES = frozenset(
+    {NotificationStatus.DELIVERED, NotificationStatus.SUPPRESSED, NotificationStatus.FAILED}
+)
+
+
 class EventKind(StrEnum):
     OPENED = "opened"
     RESOLVED = "resolved"
@@ -69,6 +87,10 @@ class EventKind(StrEnum):
     CONTEXT_FAILED = "context_failed"
     ANALYSIS_COMPLETED = "analysis_completed"
     ANALYSIS_FAILED = "analysis_failed"
+    NOTIFICATION_SENT = "notification_sent"  # n8n accepted the webhook
+    NOTIFICATION_DELIVERED = "notification_delivered"
+    NOTIFICATION_SUPPRESSED = "notification_suppressed"
+    NOTIFICATION_FAILED = "notification_failed"
 
 
 def _in(values: type[StrEnum]) -> str:
@@ -125,6 +147,42 @@ class IncidentEvent(Base):
         DateTime(timezone=True), server_default=func.now()
     )
     details: Mapped[dict[str, Any]] = mapped_column(JSONB, server_default=text("'{}'::jsonb"))
+
+
+class Notification(Base):
+    """One message about an incident, handed to n8n and reported back by it.
+
+    At most one per incident and kind. The row is the delivery's state machine: the
+    worker creates it before calling n8n, n8n claims it before sending (so a repeated
+    webhook cannot send twice) and reports the outcome.
+    """
+
+    __tablename__ = "notifications"
+    __table_args__ = (
+        UniqueConstraint("incident_id", "kind", name="uq_notifications_incident_id_kind"),
+        CheckConstraint(f"kind IN ({_in(NotificationKind)})", name="kind"),
+        CheckConstraint(f"status IN ({_in(NotificationStatus)})", name="status"),
+        CheckConstraint(f"reported_status IN ({_in(IncidentStatus)})", name="reported_status"),
+        CheckConstraint("handoff_attempts >= 0", name="handoff_attempts"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    incident_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("incidents.id", ondelete="CASCADE"))
+    kind: Mapped[str] = mapped_column(String(16))
+    status: Mapped[str] = mapped_column(String(16))
+    # The incident status the message reports: a firing message sent after the alert
+    # resolved says so, and then no separate all-clear follows.
+    reported_status: Mapped[str] = mapped_column(String(16))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    handed_off_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    handoff_attempts: Mapped[int] = mapped_column(Integer, default=0)
+    claimed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    route: Mapped[str | None] = mapped_column(String(32))
+    channel: Mapped[str | None] = mapped_column(String(32))
+    channel_message_id: Mapped[str | None] = mapped_column(String(64))
+    execution_id: Mapped[str | None] = mapped_column(String(64))
+    error: Mapped[str | None] = mapped_column(Text)
 
 
 class OutboxMessage(Base):

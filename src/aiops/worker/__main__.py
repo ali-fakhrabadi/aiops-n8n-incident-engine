@@ -20,13 +20,17 @@ from aiops import __version__
 from aiops.analysis.providers import build_analyzer
 from aiops.config import WorkerSettings
 from aiops.db.engine import create_database_engine
+from aiops.incidents.topics import TOPIC_ANALYZED, TOPIC_RESOLVED
 from aiops.logcontext.loki import LokiClient
 from aiops.logs import configure_logging
 from aiops.metrics import create_registry
+from aiops.notifications.client import N8nClient, RetryPolicy
+from aiops.notifications.signing import Signer
 from aiops.redis_client import create_redis_client
 from aiops.worker.consumer import StreamConsumer
 from aiops.worker.handlers import AnalyzeIncident, CollectLogContext, Handler
 from aiops.worker.metrics import WorkerMetrics
+from aiops.worker.notify import NotifyIncident
 from aiops.worker.relay import OutboxRelay
 
 logger = logging.getLogger("aiops.worker")
@@ -50,9 +54,25 @@ async def run(settings: WorkerSettings, stop: asyncio.Event | None = None) -> No
     llm_http = httpx.AsyncClient(timeout=settings.llm_timeout_seconds)
     analyzer = build_analyzer(settings, llm_http)
 
+    n8n_http = httpx.AsyncClient(timeout=settings.n8n_timeout_seconds)
+    n8n = (
+        N8nClient(
+            settings.n8n_webhook_url,
+            Signer(
+                settings.n8n_webhook_secret, ttl_seconds=settings.notification_token_ttl_seconds
+            ),
+            n8n_http,
+            RetryPolicy(settings.n8n_attempts, settings.n8n_backoff_seconds),
+        )
+        if settings.n8n_webhook_url and settings.n8n_webhook_secret
+        else None
+    )
+
     handlers: list[Handler] = [
         CollectLogContext(sessions, loki, settings, metrics),
         AnalyzeIncident(sessions, analyzer, settings, metrics),
+        NotifyIncident(TOPIC_ANALYZED, sessions, n8n, metrics),
+        NotifyIncident(TOPIC_RESOLVED, sessions, n8n, metrics),
     ]
     consumer_name = settings.consumer_name or f"{socket.gethostname()}-{os.getpid()}"
     relay = OutboxRelay(sessions, redis, settings, metrics)
@@ -74,6 +94,7 @@ async def run(settings: WorkerSettings, stop: asyncio.Event | None = None) -> No
             "stream": settings.stream_name,
             "loki": bool(loki),
             "analyzer": f"{analyzer.provider}:{analyzer.model}",
+            "notifications": bool(n8n),
         },
     )
     try:
@@ -83,6 +104,7 @@ async def run(settings: WorkerSettings, stop: asyncio.Event | None = None) -> No
     finally:
         await http.aclose()
         await llm_http.aclose()
+        await n8n_http.aclose()
         await redis.aclose()
         await engine.dispose()
         logger.info("worker stopped")

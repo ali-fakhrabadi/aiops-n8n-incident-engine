@@ -1,0 +1,663 @@
+{
+  "id": "aiopsIncRouting1",
+  "name": "AIOps incident routing",
+  "nodes": [
+    {
+      "parameters": {
+        "content": "## 1. Signed webhook\nThe AIOps worker posts every incident here. The **Webhook** node checks the HS256 token against the *AIOps webhook signature* credential (signature, expiry); **Verify signed payload** checks that the token was issued for this exact payload, notification and incident. Invalid requests get 400, valid ones 202 before anything is sent.",
+        "width": 920,
+        "height": 300,
+        "color": 7
+      },
+      "id": "d53dee74-f3a7-5943-aa44-105f940e79b5",
+      "name": "Note: signed webhook",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        -40,
+        -200
+      ]
+    },
+    {
+      "parameters": {
+        "content": "## 2. Claim, route, send\nThe engine is asked first: a notification can be claimed once, so a repeated webhook never sends twice. Critical and firing pages on-call with sound; other critical or warning alerts (resolved, flapping) are sent silently; info is recorded only. Telegram calls are retried 3 times, 5 s apart.",
+        "width": 1080,
+        "height": 300,
+        "color": 7
+      },
+      "id": "fc7e80a0-97cf-56ea-9b1b-c8358eef6bdc",
+      "name": "Note: claim and route",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        1080,
+        -360
+      ]
+    },
+    {
+      "parameters": {
+        "content": "## 3. Report back\nEvery outcome (delivered with Telegram's message ID, failed with the reason, suppressed) goes back to the engine, which stores it with the incident and measures the time from alert to message.",
+        "width": 460,
+        "height": 300,
+        "color": 7
+      },
+      "id": "435bf95a-fb77-5a77-a340-a88cd9c48ea0",
+      "name": "Note: report back",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        2200,
+        -200
+      ]
+    },
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "aiops-incident",
+        "authentication": "jwtAuth",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "bdd0ad46-4ee5-5cd4-b11d-a672cb12dc03",
+      "name": "Incident webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2.1,
+      "position": [
+        0,
+        300
+      ],
+      "webhookId": "82232d9e-77ee-5b24-91f7-18e584817f9a",
+      "credentials": {
+        "jwtAuth": {
+          "id": "aiopsWebhookJwt1",
+          "name": "AIOps webhook signature"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "a27347d7-6bad-5839-b626-5252abe82b5f",
+              "name": "telegram_chat_id",
+              "value": "SET_YOUR_TELEGRAM_CHAT_ID",
+              "type": "string"
+            },
+            {
+              "id": "1a1bbc23-1db3-5a99-bc4d-4aef398ce6dd",
+              "name": "aiops_api_url",
+              "value": "http://api:8000",
+              "type": "string"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "bf1c3049-d729-51bb-9928-c8d453d78b08",
+      "name": "Settings",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        220,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Code node \"Verify signed payload\" (run once for all items).\n//\n// The Webhook node has already checked the token's HS256 signature and expiry against\n// the \"AIOps webhook signature\" credential. This node checks what it cannot: that the\n// token was issued for this audience, for exactly this payload (its SHA-256 is a claim),\n// and for this notification and incident. A token captured in transit is therefore\n// useless with any other body, and it expires within minutes.\nconst crypto = require('crypto');\n\nconst ISSUER = 'aiops-engine';\nconst AUDIENCE = 'aiops-n8n';\nconst PAYLOAD_VERSION = 1;\nconst MAX_PAYLOAD_CHARS = 262144;\n\nconst request = $('Incident webhook').first().json;\nconst claims = request.jwtPayload || {};\nconst raw = request.body ? request.body.payload : undefined;\n\nfunction reject(reason) {\n  return [{ json: { valid: false, reason } }];\n}\n\nif (typeof raw !== 'string' || raw.length === 0) {\n  return reject('body.payload must be a non-empty JSON string');\n}\nif (raw.length > MAX_PAYLOAD_CHARS) {\n  return reject('payload is too large');\n}\nif (claims.iss !== ISSUER || claims.aud !== AUDIENCE) {\n  return reject('the token has an unexpected issuer or audience');\n}\n// The hash is part of the signed token, so a plain comparison is enough: without the\n// signing key nobody can obtain a token for a different hash.\nconst digest = crypto.createHash('sha256').update(raw, 'utf8').digest('hex');\nif (digest !== claims.payload_sha256) {\n  return reject('the payload does not match the token');\n}\n\nlet data;\ntry {\n  data = JSON.parse(raw);\n} catch (error) {\n  return reject('the payload is not valid JSON');\n}\nif (data.version !== PAYLOAD_VERSION) {\n  return reject(`unsupported payload version ${data.version}`);\n}\nif (!data.notification || data.notification.id !== claims.jti) {\n  return reject('the payload is for another notification');\n}\nif (!data.incident || data.incident.id !== claims.sub) {\n  return reject('the payload is for another incident');\n}\nreturn [{ json: { valid: true, ...data } }];\n"
+      },
+      "id": "3fe3962c-829e-53d6-a1a7-fb22ec17e18f",
+      "name": "Verify signed payload",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        440,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "71e46221-ac6b-5574-8ea7-9848395db815",
+              "leftValue": "={{ $json.valid }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "8ea98624-3e95-5985-9b43-49009efc1892",
+      "name": "Valid?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        660,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "{\"accepted\": true}",
+        "options": {
+          "responseCode": 202
+        }
+      },
+      "id": "b0d2dda3-60e5-5133-b772-e1039bcda9c6",
+      "name": "Accept",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [
+        880,
+        200
+      ]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify({ error: $json.reason }) }}",
+        "options": {
+          "responseCode": 400
+        }
+      },
+      "id": "22fdb9ec-bc9b-5626-bcb6-2ff437e417ba",
+      "name": "Reject",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [
+        880,
+        420
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $('Settings').first().json.aiops_api_url }}/api/v1/notifications/{{ $('Verify signed payload').first().json.notification.id }}/delivery",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ status: 'processing', execution_id: String($execution.id) }) }}",
+        "options": {
+          "timeout": 10000,
+          "response": {
+            "response": {
+              "fullResponse": true,
+              "neverError": true
+            }
+          }
+        }
+      },
+      "id": "4f8a8db5-abdf-589f-a2aa-688fb2a6fecb",
+      "name": "Claim delivery",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1100,
+        200
+      ],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "aiopsCallbackTk1",
+          "name": "AIOps delivery callback"
+        }
+      },
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2000
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "b86bc276-ba69-5e47-885e-380799c2563a",
+              "leftValue": "={{ $json.statusCode }}",
+              "rightValue": 200,
+              "operator": {
+                "type": "number",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "ccb1f8f5-dd13-5144-b13e-af25921a5c9f",
+      "name": "Claimed?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        1320,
+        200
+      ]
+    },
+    {
+      "parameters": {},
+      "id": "8224dfb6-34af-5955-ab8c-99939d4b1463",
+      "name": "Already claimed",
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [
+        1540,
+        360
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Code node \"Format message\" (run once for all items).\n//\n// Picks the route and builds the Telegram message (HTML parse mode). Every value from\n// the payload is escaped: alert labels, log quotes and model output can contain\n// anything, including markup meant to fake a message or hide a link.\n//\n// Routes (the Switch node after this one sends each to its own branch):\n//   page      critical and firing, not flapping: a message with sound\n//   quiet     any other critical or warning (flapping, resolved): a silent message\n//   suppress  info and everything else: recorded, not sent\nconst MAX_LENGTH = 4096; // Telegram's limit for one message\nconst LABELS = ['compose_project', 'compose_service', 'container', 'service', 'instance', 'job'];\nconst ICONS = { critical: '🔴', warning: '🟠', info: '🔵' };\n\nconst { notification, incident, analysis } = $('Verify signed payload').first().json;\n\nfunction escape(value) {\n  return String(value ?? '')\n    .replace(/&/g, '&amp;')\n    .replace(/</g, '&lt;')\n    .replace(/>/g, '&gt;');\n}\n\n// Shorten before escaping, so an entity is never cut in half.\nfunction clip(value, max) {\n  const text = String(value ?? '').trim();\n  return text.length > max ? `${text.slice(0, max - 1)}…` : text;\n}\n\nfunction route() {\n  const severity = incident.severity;\n  if (severity === 'critical' && incident.status === 'firing' && !incident.flapping) {\n    return 'page';\n  }\n  if (severity === 'critical' || severity === 'warning') {\n    return 'quiet';\n  }\n  return 'suppress';\n}\n\nfunction clock(iso) {\n  return iso ? `${iso.slice(0, 10)} ${iso.slice(11, 16)} UTC` : 'unknown';\n}\n\nfunction duration(fromIso, toIso) {\n  const seconds = Math.max(0, Math.round((Date.parse(toIso) - Date.parse(fromIso)) / 1000));\n  if (Number.isNaN(seconds)) return 'unknown';\n  if (seconds < 120) return `${seconds} s`;\n  if (seconds < 7200) return `${Math.round(seconds / 60)} min`;\n  return `${(seconds / 3600).toFixed(1)} h`;\n}\n\nfunction header() {\n  const resolved = incident.status === 'resolved';\n  const icon = resolved ? '✅' : ICONS[incident.severity] || '⚪';\n  const state = resolved ? 'RESOLVED' : String(incident.severity || 'unknown').toUpperCase();\n  const lines = [`${icon} <b>${escape(state)}</b> · <b>${escape(clip(incident.alertname, 120))}</b>`];\n  const annotations = incident.annotations || {};\n  if (annotations.summary) lines.push(`<i>${escape(clip(annotations.summary, 300))}</i>`);\n  const labels = incident.labels || {};\n  const where = LABELS.filter((key) => labels[key])\n    .slice(0, 4)\n    .map((key) => `${escape(key)}=<code>${escape(clip(labels[key], 80))}</code>`);\n  if (where.length) lines.push(where.join(' · '));\n  let when = `Started ${clock(incident.starts_at)}`;\n  if (resolved && incident.resolved_at) {\n    when += `, resolved after ${duration(incident.starts_at, incident.resolved_at)}`;\n  }\n  lines.push(when);\n  if (incident.flapping) lines.push('⚠️ Flapping: this alert keeps firing and resolving.');\n  return lines.join('\\n');\n}\n\n// Sections in order of importance: the last ones are dropped first when too long.\nfunction analysisSections() {\n  if (!analysis || analysis.status === 'skipped' || analysis.status === 'pending') return [];\n  if (analysis.status === 'failed') {\n    return [`<i>No analysis: ${escape(clip(analysis.reason || 'unknown reason', 300))}</i>`];\n  }\n  const source = [analysis.provider, analysis.model].filter(Boolean).join(' ');\n  const sections = [\n    `<b>Probable cause</b> (${escape(analysis.confidence || 'unknown')} confidence, ` +\n      `${escape(source)})\\n${escape(clip(analysis.probable_cause || analysis.summary, 1200))}`,\n  ];\n  const commands = (analysis.suggested_commands || []).slice(0, 6);\n  if (commands.length) {\n    const block = commands.map((item) => escape(clip(item.command, 200))).join('\\n');\n    sections.push(`<b>Read-only checks</b>\\n<pre>${block}</pre>`);\n  }\n  const evidence = (analysis.evidence || []).slice(0, 3);\n  if (evidence.length) {\n    const quotes = evidence.map((item) => `• <code>${escape(clip(item.quote, 200))}</code>`);\n    sections.push(`<b>Evidence</b>\\n${quotes.join('\\n')}`);\n  }\n  const steps = (analysis.next_steps || []).slice(0, 4);\n  if (steps.length) {\n    const list = steps.map((step, index) => `${index + 1}. ${escape(clip(step, 200))}`);\n    sections.push(`<b>Next steps</b>\\n${list.join('\\n')}`);\n  }\n  if (analysis.commands_rejected > 0) {\n    sections.push(`<i>${analysis.commands_rejected} suggested command(s) withheld: not read-only.</i>`);\n  }\n  return sections;\n}\n\nfunction message() {\n  const footer = `Incident <code>${escape(incident.id)}</code>`;\n  // The all-clear is short; the firing message carries the analysis.\n  const sections = notification.kind === 'resolved' ? [] : analysisSections();\n  // Header and footer are clipped field by field and stay far below the limit.\n  let text = [header(), ...sections, footer].join('\\n\\n');\n  while (text.length > MAX_LENGTH && sections.length) {\n    sections.pop();\n    text = [header(), ...sections, footer].join('\\n\\n');\n  }\n  return text;\n}\n\nconst chosen = route();\nreturn [\n  {\n    json: {\n      route: chosen,\n      disable_notification: chosen !== 'page',\n      text: message(),\n      notification_id: notification.id,\n      incident_id: incident.id,\n      kind: notification.kind,\n    },\n  },\n];\n"
+      },
+      "id": "83c712fd-864b-5d79-8b89-c01f8ffcce13",
+      "name": "Format message",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1540,
+        100
+      ]
+    },
+    {
+      "parameters": {
+        "rules": {
+          "values": [
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 2
+                },
+                "conditions": [
+                  {
+                    "id": "1a1aac5d-662b-5cc2-9820-b55012c0d2af",
+                    "leftValue": "={{ $json.route }}",
+                    "rightValue": "page",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "page"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 2
+                },
+                "conditions": [
+                  {
+                    "id": "c857054b-c96a-58a6-a5aa-9db466fe74da",
+                    "leftValue": "={{ $json.route }}",
+                    "rightValue": "quiet",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "quiet"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 2
+                },
+                "conditions": [
+                  {
+                    "id": "756df64d-9388-53a2-bb73-6d300fe34964",
+                    "leftValue": "={{ $json.route }}",
+                    "rightValue": "suppress",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "suppress"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "2f13d4c3-917e-510d-bb38-b1e95f584fb0",
+      "name": "Route by severity",
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3.2,
+      "position": [
+        1760,
+        100
+      ]
+    },
+    {
+      "parameters": {
+        "resource": "message",
+        "operation": "sendMessage",
+        "chatId": "={{ $('Settings').first().json.telegram_chat_id }}",
+        "text": "={{ $json.text }}",
+        "additionalFields": {
+          "appendAttribution": false,
+          "disable_notification": false,
+          "disable_web_page_preview": true,
+          "parse_mode": "HTML"
+        }
+      },
+      "id": "8fcee893-ad8e-5eff-9a88-318b3799c1ed",
+      "name": "Telegram: page on-call",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        1980,
+        -60
+      ],
+      "credentials": {
+        "telegramApi": {
+          "id": "aiopsTelegramBt1",
+          "name": "Telegram bot"
+        }
+      },
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 5000,
+      "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {
+        "resource": "message",
+        "operation": "sendMessage",
+        "chatId": "={{ $('Settings').first().json.telegram_chat_id }}",
+        "text": "={{ $json.text }}",
+        "additionalFields": {
+          "appendAttribution": false,
+          "disable_notification": true,
+          "disable_web_page_preview": true,
+          "parse_mode": "HTML"
+        }
+      },
+      "id": "80f55f1d-630a-534f-b2ed-6e87961d2516",
+      "name": "Telegram: quiet",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        1980,
+        160
+      ],
+      "credentials": {
+        "telegramApi": {
+          "id": "aiopsTelegramBt1",
+          "name": "Telegram bot"
+        }
+      },
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 5000,
+      "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "// Code node \"Delivery outcome\" (run once for each item).\n//\n// Turns whatever reached this node into one report for the engine: a Telegram\n// response (delivered, with its message_id), a Telegram node's error output after its\n// retries (failed, with the reason), or the Switch's \"suppress\" branch (suppressed).\nconst MAX_ERROR_CHARS = 500;\n\nconst message = $('Format message').item.json;\nconst input = $json;\n\nfunction describe(error) {\n  if (!error) return 'unknown error';\n  if (typeof error === 'string') return error;\n  const parts = [error.message, error.description].filter(Boolean);\n  return parts.length ? [...new Set(parts)].join(': ') : JSON.stringify(error);\n}\n\nlet report;\nif (message.route === 'suppress') {\n  report = { status: 'suppressed' };\n} else {\n  const sent = input.result && input.result.message_id !== undefined ? input.result : input;\n  if (sent && sent.message_id !== undefined && !input.error) {\n    report = { status: 'delivered', channel: 'telegram', channel_message_id: String(sent.message_id) };\n  } else {\n    report = {\n      status: 'failed',\n      channel: 'telegram',\n      error: describe(input.error).slice(0, MAX_ERROR_CHARS),\n    };\n  }\n}\n\nreturn {\n  json: {\n    notification_id: message.notification_id,\n    report: { ...report, route: message.route, execution_id: String($execution.id) },\n  },\n};\n"
+      },
+      "id": "e757d324-00f0-5c18-ac56-b773af166fa7",
+      "name": "Delivery outcome",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2240,
+        100
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $('Settings').first().json.aiops_api_url }}/api/v1/notifications/{{ $json.notification_id }}/delivery",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json.report) }}",
+        "options": {
+          "timeout": 10000
+        }
+      },
+      "id": "1b5a6785-f349-52ec-992b-338bbbca96fb",
+      "name": "Report delivery",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        2460,
+        100
+      ],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "aiopsCallbackTk1",
+          "name": "AIOps delivery callback"
+        }
+      },
+      "retryOnFail": true,
+      "maxTries": 5,
+      "waitBetweenTries": 3000
+    }
+  ],
+  "connections": {
+    "Incident webhook": {
+      "main": [
+        [
+          {
+            "node": "Settings",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Settings": {
+      "main": [
+        [
+          {
+            "node": "Verify signed payload",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Verify signed payload": {
+      "main": [
+        [
+          {
+            "node": "Valid?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Valid?": {
+      "main": [
+        [
+          {
+            "node": "Accept",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Reject",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Accept": {
+      "main": [
+        [
+          {
+            "node": "Claim delivery",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Claim delivery": {
+      "main": [
+        [
+          {
+            "node": "Claimed?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Claimed?": {
+      "main": [
+        [
+          {
+            "node": "Format message",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Already claimed",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Format message": {
+      "main": [
+        [
+          {
+            "node": "Route by severity",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Route by severity": {
+      "main": [
+        [
+          {
+            "node": "Telegram: page on-call",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Telegram: quiet",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Delivery outcome",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Telegram: page on-call": {
+      "main": [
+        [
+          {
+            "node": "Delivery outcome",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Delivery outcome",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Telegram: quiet": {
+      "main": [
+        [
+          {
+            "node": "Delivery outcome",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Delivery outcome",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Delivery outcome": {
+      "main": [
+        [
+          {
+            "node": "Report delivery",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "executionTimeout": 900
+  },
+  "pinData": {},
+  "tags": []
+}

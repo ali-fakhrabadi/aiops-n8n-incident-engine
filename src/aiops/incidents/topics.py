@@ -2,4 +2,5 @@
 
 TOPIC_OPENED = "incident.opened"  # API -> worker: collect the log context
 TOPIC_CONTEXT_READY = "incident.context_ready"  # worker -> worker: analyse it
-TOPIC_RESOLVED = "incident.resolved"  # API -> (phase 4) notification of the all-clear
+TOPIC_ANALYZED = "incident.analyzed"  # worker -> worker: notify (analysis done or failed)
+TOPIC_RESOLVED = "incident.resolved"  # API -> worker: notify the all-clear

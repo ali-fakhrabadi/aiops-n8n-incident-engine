@@ -195,7 +195,8 @@ async def test_exhausted_retries_end_in_the_dead_letter_stream(
 async def test_unhandled_and_malformed_messages_are_acknowledged(pipeline: Pipeline) -> None:
     stream = pipeline.settings.stream_name
     await pipeline.consumer.ensure_group()
-    await pipeline.redis.xadd(stream, {"topic": "incident.resolved", "payload": "{}"})
+    # A topic a newer worker version might add.
+    await pipeline.redis.xadd(stream, {"topic": "incident.escalated", "payload": "{}"})
     await pipeline.redis.xadd(stream, {"topic": "incident.opened", "payload": "not json"})
     await pipeline.redis.xadd(
         stream, {"topic": "incident.opened", "payload": '{"incident_id": "nope"}'}
@@ -206,7 +207,7 @@ async def test_unhandled_and_malformed_messages_are_acknowledged(pipeline: Pipel
     assert (await pipeline.redis.xpending(stream, "test-workers"))["pending"] == 0
     assert (
         pipeline.counter(
-            "aiops_worker_messages_total", topic="incident.resolved", outcome="ignored"
+            "aiops_worker_messages_total", topic="incident.escalated", outcome="ignored"
         )
         == 1
     )

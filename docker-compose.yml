@@ -4,8 +4,9 @@
 #   make up        # build, migrate and start; waits until health checks pass
 #
 # Flow: Alertmanager -> api (incidents + outbox in PostgreSQL) -> worker (outbox ->
-# Redis stream -> log context from Loki). Redis is the worker's only; the API does not
-# need it, so alerts are accepted while Redis is down.
+# Redis stream -> log context from Loki -> analysis -> signed webhook) -> n8n (route by
+# severity -> Telegram) -> api (delivery report). Redis is the worker's only; the API
+# does not need it, so alerts are accepted while Redis is down.
 #
 # Networks:
 #   backend  internal only, no internet access: PostgreSQL, Redis, API, worker, n8n
@@ -45,6 +46,13 @@ x-app-environment: &app-environment
 x-redis-environment: &redis-environment
   AIOPS_REDIS_HOST: redis
   AIOPS_REDIS_PASSWORD_FILE: /run/secrets/redis_password
+
+x-n8n-database: &n8n-database
+  DB_TYPE: postgresdb
+  DB_POSTGRESDB_HOST: postgres
+  DB_POSTGRESDB_DATABASE: n8n
+  DB_POSTGRESDB_USER: n8n
+  DB_POSTGRESDB_PASSWORD_FILE: /run/secrets/n8n_db_password
 
 x-app: &app
   <<: *hardened
@@ -151,7 +159,8 @@ services:
       AIOPS_METRICS_TOKEN_FILE: /run/secrets/metrics_token
       AIOPS_INGEST_TOKEN_FILE: /run/secrets/ingest_token
       AIOPS_API_TOKEN_FILE: /run/secrets/api_token
-    secrets: [aiops_app_db_password, metrics_token, ingest_token, api_token]
+      AIOPS_CALLBACK_TOKEN_FILE: /run/secrets/callback_token
+    secrets: [aiops_app_db_password, metrics_token, ingest_token, api_token, callback_token]
     ports:
       - "127.0.0.1:${AIOPS_HTTP_PORT:-8020}:8000"
     networks: [backend, edge]
@@ -176,10 +185,13 @@ services:
       AIOPS_ANALYZER: ${AIOPS_ANALYZER:-mock}
       AIOPS_LLM_MODEL: ${AIOPS_LLM_MODEL:-llama3.1}
       AIOPS_OLLAMA_URL: ${AIOPS_OLLAMA_URL:-http://host.docker.internal:11434}
+      # The n8n workflow's webhook; set it empty in .env to turn notifications off.
+      AIOPS_N8N_WEBHOOK_URL: ${AIOPS_N8N_WEBHOOK_URL-http://n8n:5678/webhook/aiops-incident}
+      AIOPS_N8N_WEBHOOK_SECRET_FILE: /run/secrets/n8n_webhook_secret
     # Ollama usually runs on the host itself (it wants all of the machine's memory).
     extra_hosts:
       - "host.docker.internal:host-gateway"
-    secrets: [aiops_app_db_password, redis_password]
+    secrets: [aiops_app_db_password, redis_password, n8n_webhook_secret]
     networks: [backend, edge]
     stop_grace_period: 30s
     healthcheck:
@@ -201,18 +213,68 @@ services:
           cpus: "1.0"
           memory: 256M
 
+  # One-shot: imports the AIOps credentials (built from ./secrets and TELEGRAM_* in
+  # .env) and the routing workflow, and publishes it; n8n starts once it is done.
+  # Skips everything when nothing changed. `make n8n-setup` reapplies and restarts n8n.
+  n8n-setup:
+    <<: *hardened
+    image: ${N8N_IMAGE:-n8nio/n8n:2.45.6@sha256:45edf89655fd66dd55ea9336c1791ad14777599fdbf6c5aec6db583ede99a40b}
+    restart: "no"
+    entrypoint: [node, /opt/aiops/setup.mjs]
+    environment:
+      <<: *n8n-database
+      N8N_ENCRYPTION_KEY_FILE: /run/secrets/n8n_encryption_key
+      N8N_LOG_LEVEL: warn
+      N8N_DIAGNOSTICS_ENABLED: "false"
+      TELEGRAM_CHAT_ID: ${TELEGRAM_CHAT_ID:-}
+      TELEGRAM_API_BASE_URL: ${TELEGRAM_API_BASE_URL:-https://api.telegram.org}
+      AIOPS_API_URL: http://api:8000
+    secrets:
+      - n8n_db_password
+      - n8n_encryption_key
+      - n8n_webhook_secret
+      - callback_token
+      - telegram_bot_token
+    volumes:
+      - n8n-data:/home/node/.n8n
+      - ./n8n_workflows:/opt/aiops/workflows:ro
+      - ./docker/n8n/setup.mjs:/opt/aiops/setup.mjs:ro
+    tmpfs:
+      # The decrypted credentials exist only here, in memory, during the import.
+      - /tmp
+      - /home/node/.cache
+    networks: [backend]
+    healthcheck:
+      disable: true
+    depends_on:
+      postgres:
+        condition: service_healthy
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 512M
+
   n8n:
     <<: *hardened
     # Digest-pinned. Override (N8N_IMAGE) only for an image loaded from a file, which
     # keeps no registry digest; verify its ID against the pinned manifest first.
     image: ${N8N_IMAGE:-n8nio/n8n:2.45.6@sha256:45edf89655fd66dd55ea9336c1791ad14777599fdbf6c5aec6db583ede99a40b}
     environment:
-      DB_TYPE: postgresdb
-      DB_POSTGRESDB_HOST: postgres
-      DB_POSTGRESDB_DATABASE: n8n
-      DB_POSTGRESDB_USER: n8n
-      DB_POSTGRESDB_PASSWORD_FILE: /run/secrets/n8n_db_password
+      <<: *n8n-database
       N8N_ENCRYPTION_KEY_FILE: /run/secrets/n8n_encryption_key
+      # Code nodes may use crypto (the webhook signature check), and nothing else.
+      NODE_FUNCTION_ALLOW_BUILTIN: crypto
+      NODE_FUNCTION_ALLOW_EXTERNAL: ""
+      # SSRF protection: workflow requests may reach public hosts and, of the private
+      # addresses, only these hosts (the engine's API; the fake Bot API in CI), never
+      # PostgreSQL, Redis or the host. Add your own with N8N_SSRF_ALLOWED_HOSTNAMES.
+      N8N_SSRF_PROTECTION_ENABLED: "true"
+      N8N_SSRF_ALLOWED_HOSTNAMES: api,fake-telegram,${N8N_SSRF_ALLOWED_HOSTNAMES:-}
+      # Optional outbound proxy (Telegram). n8n applies it to every request, with no
+      # implicit exceptions, so the internal services are always listed in NO_PROXY.
+      HTTPS_PROXY: ${N8N_HTTPS_PROXY:-}
+      NO_PROXY: localhost,127.0.0.1,::1,api,postgres,n8n,fake-telegram,host.docker.internal,${N8N_NO_PROXY:-}
       N8N_HOST: ${N8N_HOST:-localhost}
       N8N_PORT: "5678"
       N8N_PROTOCOL: ${N8N_PROTOCOL:-http}
@@ -225,6 +287,8 @@ services:
       N8N_DIAGNOSTICS_ENABLED: "false"
       N8N_VERSION_NOTIFICATIONS_ENABLED: "false"
       N8N_TEMPLATES_ENABLED: "false"
+      # The MCP server registry fetches from api.n8n.io on a timer: not on this host.
+      N8N_DISABLED_MODULES: mcp-registry
       # Built-in nodes only: no community packages, verified or not (supply chain).
       N8N_COMMUNITY_PACKAGES_ENABLED: "false"
       N8N_UNVERIFIED_PACKAGES_ENABLED: "false"
@@ -247,6 +311,9 @@ services:
     ports:
       - "127.0.0.1:${N8N_HTTP_PORT:-5678}:5678"
     networks: [backend, edge]
+    # A proxy on the host (v2rayA, Squid, ...) is reachable as host.docker.internal.
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     healthcheck:
       test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:5678/healthz/readiness"]
       interval: 10s
@@ -256,6 +323,8 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+      n8n-setup:
+        condition: service_completed_successfully
     deploy:
       resources:
         limits:
@@ -324,3 +393,10 @@ secrets:
     file: ./secrets/ingest_token
   api_token:
     file: ./secrets/api_token
+  callback_token:
+    file: ./secrets/callback_token
+  n8n_webhook_secret:
+    file: ./secrets/n8n_webhook_secret
+  # Yours: `make secrets` only creates it empty. Never commit it.
+  telegram_bot_token:
+    file: ./secrets/telegram_bot_token
