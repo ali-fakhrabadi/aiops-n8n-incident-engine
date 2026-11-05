@@ -118,7 +118,7 @@ workflow-check: ## Fail if the committed n8n workflow JSON is out of date
 test-workflow: ## Unit tests of the n8n Code nodes (node --test, in the n8n image)
 	docker run --rm --read-only --network none --user node \
 		--volume "$(CURDIR)/n8n_workflows:/workflows:ro" --entrypoint node \
-		$(N8N_IMAGE) --test /workflows/tests/
+		$(N8N_IMAGE) --test /workflows/tests/code_nodes.test.mjs
 
 n8n-setup: ## Re-import n8n's credentials and workflow (after changing TELEGRAM_*), restart n8n
 	$(COMPOSE) stop n8n

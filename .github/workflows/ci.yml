@@ -58,7 +58,7 @@ jobs:
       - name: n8n Code node tests (node --test)
         run: |
           node --version
-          node --test n8n_workflows/tests/
+          node --test n8n_workflows/tests/code_nodes.test.mjs
 
   test:
     name: Tests (PostgreSQL 17, Redis 7)
