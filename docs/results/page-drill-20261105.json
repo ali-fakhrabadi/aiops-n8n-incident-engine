@@ -1,0 +1,54 @@
+[
+  {
+    "alertname": "TargetDown",
+    "severity": "critical",
+    "labels": {
+      "severity": "critical",
+      "alertname": "TargetDown"
+    },
+    "started_at": "2026-11-05T15:01:48.025000Z",
+    "alertmanager_seconds": 10.0,
+    "duration_seconds": 130.0,
+    "log_lines": 82,
+    "context_status": "collected",
+    "analysis_status": "completed",
+    "model": "ollama llama3.1",
+    "model_seconds": 387.8,
+    "confidence": "low",
+    "probable_cause": "unknown",
+    "commands": [
+      "docker logs --tail 200 observability-grafana-1",
+      "docker stats --no-stream observability-grafana-1",
+      "docker compose -p grafana ps observability-grafana-1"
+    ],
+    "commands_rejected": 0,
+    "evidence_kept": 2,
+    "evidence_dropped": 0,
+    "messages": [
+      {
+        "kind": "page",
+        "status": "delivered",
+        "route": "page",
+        "seconds_in_channel": 1.549,
+        "alert_to_message_seconds": 12.6,
+        "analysis_to_handoff_seconds": null
+      },
+      {
+        "kind": "resolved",
+        "status": "delivered",
+        "route": "quiet",
+        "seconds_in_channel": 0.799,
+        "alert_to_message_seconds": 1.4,
+        "analysis_to_handoff_seconds": null
+      },
+      {
+        "kind": "firing",
+        "status": "delivered",
+        "route": "reply",
+        "seconds_in_channel": 0.858,
+        "alert_to_message_seconds": 399.8,
+        "analysis_to_handoff_seconds": 0.4
+      }
+    ]
+  }
+]

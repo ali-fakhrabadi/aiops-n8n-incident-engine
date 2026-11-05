@@ -20,9 +20,10 @@ alert or log line leaves it.
 ![The n8n routing workflow: signed webhook, claim, route by severity, Telegram, report](docs/images/n8n-workflow.png)
 
 *The import-ready n8n workflow, set up automatically by `make up`. Below, one of its real
-executions: a warning routed to the silent Telegram branch and reported back.*
+executions: the analysis of a critical alert in a fault drill, sent as a silent reply to
+the page that had gone out at once, and reported back.*
 
-![A real execution of the workflow, every step green, through "Telegram: quiet"](docs/images/n8n-execution.png)
+![A real execution of the workflow, every step green, through "Telegram: analysis reply"](docs/images/n8n-execution.png)
 
 ## Architecture
 
@@ -219,10 +220,18 @@ running.
 Once the analysis is stored (or has failed: the alert alone is still worth a message),
 the worker hands the incident to the n8n workflow
 [`n8n_workflows/aiops_incident_routing.json`](n8n_workflows/aiops_incident_routing.json).
-Each incident gets at most two messages: the firing one with the analysis, and an
-all-clear when the alert resolves. When it resolves before the analysis is done, the
-firing message says so and no all-clear follows; that decision is taken under a lock on
-the incident row, so the two can never both be skipped or both be sent.
+Each incident gets at most three messages:
+
+* **the page**, for a critical alert that fires and is not flapping: queued in the same
+  transaction that opens the incident and sent at once, with sound, before any log is
+  read or any model asked;
+* **the analysis**, once it is done (or has failed): for a paged incident a silent reply
+  to the page in the chat, otherwise the incident's first message;
+* **the all-clear**, when the alert resolves, if a message announced it as firing. When
+  it resolves before any message went out, the analysis says so instead.
+
+These decisions are taken under a lock on the incident row, which the ingestion also
+takes when the alert resolves, so no message is skipped or sent twice in a race.
 
 ```mermaid
 flowchart LR
@@ -233,8 +242,9 @@ flowchart LR
     cd -->|yes| fm["Format message<br/>(Code)"] --> sw{"Route by severity<br/>(Switch)"}
     sw -->|page| tp["Telegram: page on-call"]
     sw -->|quiet| tq["Telegram: quiet"]
+    sw -->|reply| tr["Telegram: analysis reply"]
     sw -->|suppress| out
-    tp & tq -->|answer or error| out["Delivery outcome<br/>(Code)"] --> rp["Report delivery<br/>(engine API)"]
+    tp & tq & tr -->|answer or error| out["Delivery outcome<br/>(Code)"] --> rp["Report delivery<br/>(engine API)"]
 ```
 
 **A signed webhook.** The body is `{"payload": "<JSON text>"}`; the `Authorization`
@@ -256,7 +266,8 @@ engine stores it with the incident and its timeline, and measures how long it to
 
 | Alert | Route | Telegram |
 |---|---|---|
-| `critical`, firing, not flapping | `page` | A message with sound |
+| `critical`, firing, not flapping | `page` | At once, with sound; no analysis yet |
+| the analysis of a paged incident | `reply` | A silent reply to the page |
 | any other `critical` or `warning` (resolved, flapping) | `quiet` | A silent message |
 | `info`, `none`, unknown | `suppress` | Nothing; recorded as suppressed |
 
@@ -370,11 +381,15 @@ settings for a CPU (`AIOPS_LLM_MAX_LOG_LINES=60`, `AIOPS_LLM_MAX_LOG_CHARS=4000`
   crash loop that prints nothing, a throttled CPU) the answer was "unknown" or
   "insufficient information", at low confidence, not an invented cause. The checks
   removed two commands in which the model had kept the prompt's `<project>` placeholder.
-* **Critical first.** The critical alert's analysis has a lane of its own and waited only
-  for the one analysis already running. It still took 8 minutes on this CPU, by which
-  time Grafana was back: the message reported the resolution, silently. With a GPU or a
-  hosted model the analysis takes seconds; on a slow host, paging before the analysis is
-  the next step (see the roadmap).
+* **Critical alerts page at once.** In this round the critical alert's analysis (in its
+  own lane) still took 8 minutes on this CPU, and its only message went out after
+  Grafana was back: late and silent. Since then a critical alert pages before any
+  analysis. The same drill again
+  ([results](docs/results/page-drill-20261105.json)): the page with sound reached
+  Telegram **12.6 s** after the alert fired (10 s of it Alertmanager's `group_wait`, 0.9 s
+  the engine, 1.5 s n8n and Telegram); when Grafana came back two minutes later the
+  all-clear followed 1.4 s after the resolution; the analysis arrived as a reply to the
+  page 6.5 minutes after the alert (388 s of model time).
 
 **The first round, before the fixes**
 ([results](docs/results/drills-round1-20261105.json)), with the defaults (300 s
@@ -518,9 +533,10 @@ hour), new ones at once.
 | `make screenshots` | PNGs of the n8n workflow, a real execution and the API docs (Playwright) |
 | `python3 scripts/incident_report.py` | Measured results of incidents from the engine's records (JSON and a table) |
 
-236 Python tests with 97% branch coverage, and 13 Code-node tests; CI also checks that
+244 Python tests with 97% branch coverage, and 16 Code-node tests; CI also checks that
 the models and migrations agree (`alembic check`) and runs the smoke test against the
-full stack, from an alert to a (fake) Telegram message, retries included.
+full stack, from an alert to a (fake) Telegram page and the analysis replying to it,
+retries included.
 
 ## Roadmap
 
@@ -537,13 +553,11 @@ full stack, from an alert to a (fake) Telegram message, retries included.
    fake Bot API for CI, `scripts/simulate_alert.py`, `make telegram-test`, the
    observability stack's Alertmanager wired in.
 5. **Measured results** (done): end-to-end latency and analysis quality on real fault
-   drills, the model on a separate machine, the n8n owner account from secrets,
-   screenshots, final documentation.
+   drills, critical alerts paged before their analysis, the model on a separate machine,
+   the n8n owner account from secrets, screenshots, final documentation.
 
-Next candidates: for critical alerts on a slow model host, a page at once and the
-analysis as a follow-up message; n8n's task runner as a separate container (internal
-mode is deprecated in n8n 2.45); an incident view in Grafana; Slack and e-mail branches
-in the workflow.
+Next candidates: n8n's task runner as a separate container (internal mode is deprecated
+in n8n 2.45); an incident view in Grafana; Slack and e-mail branches in the workflow.
 
 ## License
 
