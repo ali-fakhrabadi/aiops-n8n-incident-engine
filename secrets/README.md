@@ -17,6 +17,7 @@ this directory except this file is ignored by Git.
 | `callback_token` | Bearer token n8n presents to report deliveries; good for nothing else |
 | `n8n_webhook_secret` | HS256 key the worker signs webhooks to n8n with (n8n keeps it as a JWT credential) |
 | `telegram_bot_token` | **Yours**: the token from @BotFather. Created empty, never overwritten |
+| `n8n_owner_password` | Password of the n8n owner account (`N8N_OWNER_EMAIL` in `.env`); n8n gets its bcrypt hash |
 
 Keep a backup of `n8n_encryption_key`: credentials stored in n8n cannot be decrypted
 without it.

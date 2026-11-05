@@ -99,6 +99,7 @@ async def test_the_worker_process_handles_an_alert_end_to_end(
     for key in (
         settings.stream_name,
         settings.analysis_stream_name,
+        settings.critical_analysis_stream_name,
         settings.dead_letter_stream_name,
     ):
         await redis.delete(key)

@@ -39,6 +39,7 @@ create_random ingest_token
 create_random api_token
 create_random callback_token
 create_random n8n_webhook_secret
+create_random n8n_owner_password
 
 # The Telegram bot token is yours (from @BotFather): it is only created empty, so the
 # stack starts without Telegram, and it is never overwritten.

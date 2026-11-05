@@ -81,14 +81,19 @@ async def run(settings: WorkerSettings, stop: asyncio.Event | None = None) -> No
     consumer = StreamConsumer(
         redis, settings, {handler.topic: handler for handler in handlers}, metrics, consumer_name
     )
-    # The analysis lane: the same consumer on the analysis stream, one model call at a time.
-    analysis = StreamConsumer(
-        redis,
-        settings.model_copy(update={"stream_name": settings.analysis_stream_name}),
-        {analyze.topic: analyze},
-        metrics,
-        consumer_name,
-    )
+    # The analysis lanes: the same consumer on the analysis streams, one model call at a
+    # time each. The model host serves requests in order, so a critical alert's analysis
+    # waits for one warning's at most.
+    analysis_lanes = [
+        StreamConsumer(
+            redis,
+            settings.model_copy(update={"stream_name": stream}),
+            {analyze.topic: analyze},
+            metrics,
+            consumer_name,
+        )
+        for stream in (settings.critical_analysis_stream_name, settings.analysis_stream_name)
+    ]
 
     if stop is None:
         stop = asyncio.Event()
@@ -101,7 +106,11 @@ async def run(settings: WorkerSettings, stop: asyncio.Event | None = None) -> No
         extra={
             "version": __version__,
             "consumer": consumer_name,
-            "streams": [settings.stream_name, settings.analysis_stream_name],
+            "streams": [
+                settings.stream_name,
+                settings.critical_analysis_stream_name,
+                settings.analysis_stream_name,
+            ],
             "loki": bool(loki),
             "analyzer": f"{analyzer.provider}:{analyzer.model}",
             "notifications": bool(n8n),
@@ -111,7 +120,8 @@ async def run(settings: WorkerSettings, stop: asyncio.Event | None = None) -> No
         async with asyncio.TaskGroup() as tasks:
             tasks.create_task(relay.run(stop))
             tasks.create_task(consumer.run(stop))
-            tasks.create_task(analysis.run(stop))
+            for lane in analysis_lanes:
+                tasks.create_task(lane.run(stop))
     finally:
         await http.aclose()
         await llm_http.aclose()

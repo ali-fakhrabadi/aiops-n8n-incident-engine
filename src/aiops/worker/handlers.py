@@ -144,13 +144,13 @@ class CollectLogContext:
     ) -> None:
         now = self._clock()
         async with self._sessions() as session, session.begin():
-            changed = await session.scalar(
+            severity = await session.scalar(
                 update(Incident)
                 .where(Incident.id == incident_id, Incident.context_status == ContextStatus.PENDING)
                 .values(context=context, context_status=status, context_updated_at=now)
-                .returning(Incident.id)
+                .returning(Incident.severity)
             )
-            if changed is None:
+            if severity is None:
                 return  # another delivery got there first
             details: dict[str, Any] = {"status": status.value}
             if "lines" in context:
@@ -165,9 +165,13 @@ class CollectLogContext:
             )
             session.add(IncidentEvent(incident_id=incident_id, kind=kind, details=details))
             # Next stage, in the same transaction: analysis runs with whatever was found,
-            # including nothing (the alert alone is still worth a look).
+            # including nothing (the alert alone is still worth a look). The severity picks
+            # the analysis lane: critical alerts never queue behind warnings.
             session.add(
-                OutboxMessage(topic=TOPIC_CONTEXT_READY, payload={"incident_id": str(incident_id)})
+                OutboxMessage(
+                    topic=TOPIC_CONTEXT_READY,
+                    payload={"incident_id": str(incident_id), "severity": severity},
+                )
             )
         self._metrics.contexts.labels(status.value).inc()
         logger.info(

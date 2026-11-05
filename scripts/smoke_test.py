@@ -257,6 +257,16 @@ class Smoke:
         reply = fetch(f"{self.n8n}/healthz/readiness")
         return None if reply.status == HTTPStatus.OK else f"HTTP {reply.status}"
 
+    def n8n_has_no_setup_page(self) -> str | None:
+        """The owner comes from the environment: nobody can claim the instance first."""
+        reply = fetch(f"{self.n8n}/rest/settings")
+        if reply.status != HTTPStatus.OK:
+            return f"HTTP {reply.status}"
+        settings: Any = reply.json()
+        if settings["data"]["userManagement"].get("showSetupOnFirstLoad") is not False:
+            return "n8n offers its owner setup page"
+        return None
+
     def n8n_webhook_needs_a_signed_token(self) -> str | None:
         """The workflow is published (404 otherwise) and refuses unsigned requests."""
         url = f"{self.n8n}/webhook/aiops-incident"
@@ -342,6 +352,7 @@ def main() -> int:
             smoke.tokens_are_separate,
         ),
         ("n8n ready (its database reachable)", smoke.n8n_ready),
+        ("n8n's owner is set up: no setup page to claim", smoke.n8n_has_no_setup_page),
         (
             "n8n's incident webhook is published and refuses unsigned requests",
             smoke.n8n_webhook_needs_a_signed_token,

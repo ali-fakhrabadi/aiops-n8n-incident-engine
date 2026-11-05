@@ -86,12 +86,15 @@ class Pipeline:
         self.consumer = StreamConsumer(
             redis, settings, {h.topic: h for h in handlers}, self.metrics, "test-consumer"
         )
-        self.analysis = StreamConsumer(
-            redis,
-            settings.model_copy(update={"stream_name": settings.analysis_stream_name}),
-            {analyze.topic: analyze},
-            self.metrics,
-            "test-consumer",
+        self.analysis, self.critical = (
+            StreamConsumer(
+                redis,
+                settings.model_copy(update={"stream_name": stream}),
+                {analyze.topic: analyze},
+                self.metrics,
+                "test-consumer",
+            )
+            for stream in (settings.analysis_stream_name, settings.critical_analysis_stream_name)
         )
 
     async def _sleep(self, seconds: float) -> None:
@@ -110,9 +113,11 @@ class Pipeline:
     async def run(self) -> int:
         """One pass: publish the outbox, then handle what is due in both lanes."""
         await self.relay.publish_batch()
-        await self.consumer.ensure_group()
-        await self.analysis.ensure_group()
-        return await self.consumer.run_once() + await self.analysis.run_once()
+        handled = 0
+        for consumer in (self.consumer, self.critical, self.analysis):
+            await consumer.ensure_group()
+            handled += await consumer.run_once()
+        return handled
 
     async def run_until_idle(self, passes: int = 10) -> None:
         """Pass after pass until nothing is left to do (each stage adds the next event)."""

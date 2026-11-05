@@ -226,3 +226,32 @@ def test_openai_without_a_key_is_a_configuration_error(tmp_path: Path) -> None:
         _settings(tmp_path, analyzer="openai", openai_api_key=None)
     with pytest.raises(ValidationError, match="http"):
         _settings(tmp_path, ollama_url="ollama:11434")
+
+
+@respx.mock
+async def test_ollama_threads_follow_the_settings(tmp_path: Path) -> None:
+    route = respx.post(f"{OLLAMA}/api/chat").mock(
+        return_value=httpx.Response(
+            200, json={"message": {"role": "assistant", "content": json.dumps(VALID)}}
+        )
+    )
+    limited = _settings(tmp_path, analyzer="ollama", ollama_url=OLLAMA, llm_num_thread=8)
+    unset = _settings(tmp_path, analyzer="ollama", ollama_url=OLLAMA, llm_num_thread="")
+
+    async with httpx.AsyncClient() as http:
+        await build_analyzer(limited, http).analyze(_request())
+        await build_analyzer(unset, http).analyze(_request())
+
+    first, second = (json.loads(call.request.content)["options"] for call in route.calls)
+    assert first["num_thread"] == 8
+    assert "num_thread" not in second  # an empty variable leaves it to Ollama
+
+
+def test_a_claim_must_outlast_an_analysis(tmp_path: Path) -> None:
+    with pytest.raises(ValidationError, match="claim_idle_seconds must be longer"):
+        _settings(tmp_path, analyzer="ollama", llm_timeout_seconds=600, claim_idle_seconds=600)
+
+    settings = _settings(
+        tmp_path, analyzer="ollama", llm_timeout_seconds=600, claim_idle_seconds=900
+    )
+    assert settings.claim_idle_seconds > settings.llm_timeout_seconds

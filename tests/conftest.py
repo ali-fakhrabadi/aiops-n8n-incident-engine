@@ -81,6 +81,7 @@ def worker_settings(tmp_path: Path, **overrides: Any) -> WorkerSettings:
         "environment": "test",
         "stream_name": f"test:{run}:incidents",
         "analysis_stream_name": f"test:{run}:analysis",
+        "critical_analysis_stream_name": f"test:{run}:analysis:critical",
         "dead_letter_stream_name": f"test:{run}:dead",
         "consumer_group": "test-workers",
         "consumer_name": "test-consumer",

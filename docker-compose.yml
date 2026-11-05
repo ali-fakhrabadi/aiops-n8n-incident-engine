@@ -185,6 +185,12 @@ services:
       AIOPS_ANALYZER: ${AIOPS_ANALYZER:-mock}
       AIOPS_LLM_MODEL: ${AIOPS_LLM_MODEL:-llama3.1}
       AIOPS_OLLAMA_URL: ${AIOPS_OLLAMA_URL:-http://host.docker.internal:11434}
+      AIOPS_LLM_NUM_THREAD: ${AIOPS_LLM_NUM_THREAD:-}
+      # Size these to the model host: a CPU reads a long prompt slowly (see the README).
+      AIOPS_LLM_TIMEOUT_SECONDS: ${AIOPS_LLM_TIMEOUT_SECONDS:-300}
+      AIOPS_LLM_MAX_LOG_LINES: ${AIOPS_LLM_MAX_LOG_LINES:-150}
+      AIOPS_LLM_MAX_LOG_CHARS: ${AIOPS_LLM_MAX_LOG_CHARS:-12000}
+      AIOPS_CLAIM_IDLE_SECONDS: ${AIOPS_CLAIM_IDLE_SECONDS:-600}
       # The n8n workflow's webhook; set it empty in .env to turn notifications off.
       AIOPS_N8N_WEBHOOK_URL: ${AIOPS_N8N_WEBHOOK_URL-http://n8n:5678/webhook/aiops-incident}
       AIOPS_N8N_WEBHOOK_SECRET_FILE: /run/secrets/n8n_webhook_secret
@@ -235,6 +241,7 @@ services:
       - n8n_webhook_secret
       - callback_token
       - telegram_bot_token
+      - n8n_owner_password
     volumes:
       - n8n-data:/home/node/.n8n
       - ./n8n_workflows:/opt/aiops/workflows:ro
@@ -263,6 +270,11 @@ services:
     environment:
       <<: *n8n-database
       N8N_ENCRYPTION_KEY_FILE: /run/secrets/n8n_encryption_key
+      # The owner account comes from here, not from a setup page: sign in with
+      # N8N_OWNER_EMAIL and the password in secrets/n8n_owner_password.
+      N8N_INSTANCE_OWNER_MANAGED_BY_ENV: "true"
+      N8N_INSTANCE_OWNER_EMAIL: ${N8N_OWNER_EMAIL:-owner@example.com}
+      N8N_INSTANCE_OWNER_PASSWORD_HASH_FILE: /home/node/.n8n/aiops-owner-password.bcrypt
       # Code nodes may use crypto (the webhook signature check), and nothing else.
       NODE_FUNCTION_ALLOW_BUILTIN: crypto
       NODE_FUNCTION_ALLOW_EXTERNAL: ""
@@ -287,6 +299,8 @@ services:
       N8N_DIAGNOSTICS_ENABLED: "false"
       N8N_VERSION_NOTIFICATIONS_ENABLED: "false"
       N8N_TEMPLATES_ENABLED: "false"
+      # No personalization survey for the owner (it is also sent to n8n).
+      N8N_PERSONALIZATION_ENABLED: "false"
       # The MCP server registry fetches from api.n8n.io on a timer: not on this host.
       N8N_DISABLED_MODULES: mcp-registry
       # Built-in nodes only: no community packages, verified or not (supply chain).
@@ -402,3 +416,5 @@ secrets:
   # Yours: `make secrets` only creates it empty. Never commit it.
   telegram_bot_token:
     file: ./secrets/telegram_bot_token
+  n8n_owner_password:
+    file: ./secrets/n8n_owner_password

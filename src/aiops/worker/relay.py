@@ -18,7 +18,7 @@ from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from aiops.config import WorkerSettings
-from aiops.incidents.models import OutboxMessage
+from aiops.incidents.models import OutboxMessage, Severity
 from aiops.incidents.topics import ANALYSIS_TOPICS
 from aiops.worker.metrics import WorkerMetrics
 
@@ -61,9 +61,7 @@ class OutboxRelay:
             async with self._redis.pipeline(transaction=False) as pipe:
                 for row in rows:
                     pipe.xadd(
-                        settings.analysis_stream_name
-                        if row.topic in ANALYSIS_TOPICS
-                        else settings.stream_name,
+                        self._stream(row),
                         {
                             "event_id": str(row.id),
                             "topic": row.topic,
@@ -78,6 +76,15 @@ class OutboxRelay:
                 row.published_at = published_at
         self._metrics.published.inc(len(rows))
         return len(rows)
+
+    def _stream(self, row: OutboxMessage) -> str:
+        """Analysis requests have lanes of their own, critical alerts' one first of all."""
+        settings = self._settings
+        if row.topic not in ANALYSIS_TOPICS:
+            return settings.stream_name
+        if row.payload.get("severity") == Severity.CRITICAL:
+            return settings.critical_analysis_stream_name
+        return settings.analysis_stream_name
 
     async def prune(self, now: datetime) -> int:
         """Delete events published more than RETENTION ago."""

@@ -85,11 +85,23 @@ async def _post(
 class OllamaAnalyzer:
     provider = "ollama"
 
-    def __init__(self, base_url: str, model: str, http: httpx.AsyncClient, *, num_ctx: int) -> None:
+    def __init__(
+        self,
+        base_url: str,
+        model: str,
+        http: httpx.AsyncClient,
+        *,
+        num_ctx: int,
+        num_thread: int | None = None,
+    ) -> None:
         self._url = f"{base_url.rstrip('/')}/api/chat"
         self.model = model
         self._http = http
-        self._num_ctx = num_ctx
+        self._options: dict[str, int] = {"temperature": 0, "seed": SEED, "num_ctx": num_ctx}
+        if num_thread is not None:
+            # Ollama starts one thread per physical core it sees, CPU limits or not; on a
+            # host where it may use only some cores, more threads than cores slow it down.
+            self._options["num_thread"] = num_thread
 
     async def analyze(self, request: AnalysisRequest) -> AnalyzerResult:
         body = {
@@ -97,7 +109,7 @@ class OllamaAnalyzer:
             "messages": list(request.messages),
             "stream": False,
             "format": OUTPUT_SCHEMA,
-            "options": {"temperature": 0, "seed": SEED, "num_ctx": self._num_ctx},
+            "options": self._options,
             # Keep the model loaded between incidents; loading takes longer than answering.
             "keep_alive": "30m",
         }
@@ -183,7 +195,11 @@ def build_analyzer(settings: WorkerSettings, http: httpx.AsyncClient) -> Analyze
     """The analyser the settings ask for; `http` must allow llm_timeout_seconds."""
     if settings.analyzer == "ollama":
         return OllamaAnalyzer(
-            settings.ollama_url, settings.llm_model, http, num_ctx=settings.llm_num_ctx
+            settings.ollama_url,
+            settings.llm_model,
+            http,
+            num_ctx=settings.llm_num_ctx,
+            num_thread=settings.llm_num_thread,
         )
     if settings.analyzer == "openai":
         if settings.openai_api_key is None:  # pragma: no cover - rejected by the settings

@@ -11,7 +11,13 @@
 import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { createRequire } from 'node:module';
 import { join } from 'node:path';
+
+// n8n's own bcrypt implementation, from its installation.
+const bcrypt = createRequire('/usr/local/lib/node_modules/n8n/package.json')('bcryptjs');
+// n8n reads the owner's password hash from here (N8N_INSTANCE_OWNER_PASSWORD_HASH_FILE).
+const OWNER_HASH_FILE = '/home/node/.n8n/aiops-owner-password.bcrypt';
 
 const WORKFLOW_FILE = process.env.AIOPS_WORKFLOW_FILE || '/opt/aiops/workflows/aiops_incident_routing.json';
 const STATE_FILE = '/home/node/.n8n/aiops-setup.sha256';
@@ -99,7 +105,20 @@ async function n8nIsRunning() {
   }
 }
 
+// The owner account is managed from the environment (N8N_INSTANCE_OWNER_MANAGED_BY_ENV), so
+// the editor never shows a setup page anyone could claim first. Its password is a secret;
+// n8n wants a bcrypt hash of it, rewritten only when the password changes.
+function ownerHash() {
+  const password = secret('n8n_owner_password');
+  try {
+    if (bcrypt.compareSync(password, readFileSync(OWNER_HASH_FILE, 'utf8').trim())) return;
+  } catch {}
+  writeFileSync(OWNER_HASH_FILE, `${bcrypt.hashSync(password, 12)}\n`, { mode: 0o600 });
+  log('owner password hash written');
+}
+
 async function main() {
+  ownerHash();
   const telegramSettings = telegram();
   const workflow = configure(JSON.parse(readFileSync(WORKFLOW_FILE, 'utf8')), telegramSettings);
   const creds = credentials(workflow, telegramSettings);

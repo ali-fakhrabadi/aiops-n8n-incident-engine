@@ -92,6 +92,8 @@ class RuntimeSettings(DatabaseSettings):
     # have a stream of their own, so a slow model never holds up anything else.
     stream_name: str = "aiops:incidents"
     analysis_stream_name: str = "aiops:incidents:analysis"
+    # Critical alerts' analyses: a lane of their own, so a page never waits for warnings.
+    critical_analysis_stream_name: str = "aiops:incidents:analysis:critical"
     dead_letter_stream_name: str = "aiops:incidents:dead"
     consumer_group: str = "aiops-workers"
     # Keep roughly this many entries per stream (XADD MAXLEN ~).
@@ -162,6 +164,8 @@ class WorkerSettings(RuntimeSettings):
     # A CPU-only 8B model needs a minute or two per incident.
     llm_timeout_seconds: float = Field(default=300.0, gt=0, le=1800)
     llm_num_ctx: int = Field(default=8192, ge=2048, le=131_072)
+    # Ollama's CPU threads; empty lets Ollama decide (one per physical core it sees).
+    llm_num_thread: int | None = Field(default=None, ge=1, le=256)
     # How much of the collected log context goes into the prompt.
     llm_max_log_lines: int = Field(default=150, ge=0, le=2000)
     llm_max_log_chars: int = Field(default=12_000, ge=0, le=200_000)
@@ -209,6 +213,12 @@ class WorkerSettings(RuntimeSettings):
     def _optional_http_url(cls, value: str | None) -> str | None:
         return _http_url(value) if value else None
 
+    @field_validator("llm_num_thread", mode="before")
+    @classmethod
+    def _empty_is_unset(cls, value: Any) -> Any:
+        # Compose passes an unset variable as an empty string.
+        return None if value == "" else value
+
     @field_validator("n8n_webhook_secret")
     @classmethod
     def _strong_secret(cls, value: SecretStr | None) -> SecretStr | None:
@@ -230,6 +240,10 @@ class WorkerSettings(RuntimeSettings):
             raise ValueError(msg)
         if self.n8n_webhook_url and self.n8n_webhook_secret is None:
             msg = "n8n_webhook_url needs n8n_webhook_secret (or n8n_webhook_secret_file)"
+            raise ValueError(msg)
+        if self.analyzer != "mock" and 0 < self.claim_idle_seconds <= self.llm_timeout_seconds:
+            # Otherwise another worker claims an analysis while it is still running.
+            msg = "claim_idle_seconds must be longer than llm_timeout_seconds"
             raise ValueError(msg)
         return self
 

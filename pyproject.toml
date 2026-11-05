@@ -42,6 +42,8 @@ select = [
 "tests/**" = ["S101", "S105", "S106", "PLR2004", "PLR0913"]
 # The smoke test is a command-line tool: it prints results and runs docker.
 "scripts/**" = ["T20", "S603", "S607", "S310"]
+# Container tools (screenshots): command-line programs that print what they did.
+"tools/**" = ["T20"]
 
 [tool.ruff.lint.isort]
 known-first-party = ["aiops"]

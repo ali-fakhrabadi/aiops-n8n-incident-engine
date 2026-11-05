@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from collections.abc import AsyncIterator, Callable
 from datetime import timedelta
 from pathlib import Path
@@ -259,17 +260,24 @@ class BlockingAnalyzer:
         )
 
 
-async def test_analysis_requests_have_a_stream_of_their_own(make_pipeline: MakePipeline) -> None:
+async def test_analysis_requests_have_lanes_of_their_own(make_pipeline: MakePipeline) -> None:
     pipeline = make_pipeline(loki_url=None)
-    await pipeline.deliver(alert())
-
-    await pipeline.run()  # incident.opened -> log context, queues incident.context_ready
+    await pipeline.deliver(
+        alert("HostHighCpuUsage", fingerprint="aaaa000000000001"),
+        alert("TargetDown", severity="critical", fingerprint="bbbb000000000002"),
+    )
+    # Only the main lane runs: incident.opened -> log context -> incident.context_ready.
+    await pipeline.relay.publish_batch()
+    await pipeline.consumer.ensure_group()
+    await pipeline.consumer.run_once()
     await pipeline.relay.publish_batch()
 
     main = await entries(pipeline.redis, pipeline.settings.stream_name)
     lane = await entries(pipeline.redis, pipeline.settings.analysis_stream_name)
-    assert [fields["topic"] for _, fields in main] == ["incident.opened"]
-    assert [fields["topic"] for _, fields in lane] == ["incident.context_ready"]
+    first = await entries(pipeline.redis, pipeline.settings.critical_analysis_stream_name)
+    assert [fields["topic"] for _, fields in main] == ["incident.opened"] * 2
+    assert [json.loads(fields["payload"])["severity"] for _, fields in lane] == ["warning"]
+    assert [json.loads(fields["payload"])["severity"] for _, fields in first] == ["critical"]
 
 
 async def test_a_slow_analysis_does_not_hold_up_other_incidents(

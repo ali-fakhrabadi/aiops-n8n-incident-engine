@@ -36,7 +36,9 @@ ROOT = Path(__file__).resolve().parent.parent
 
 def _analyzer(args: argparse.Namespace, http: httpx.AsyncClient) -> Analyzer:
     if args.analyzer == "ollama":
-        return OllamaAnalyzer(args.ollama_url, args.model, http, num_ctx=args.num_ctx)
+        return OllamaAnalyzer(
+            args.ollama_url, args.model, http, num_ctx=args.num_ctx, num_thread=args.num_thread
+        )
     if args.analyzer == "openai":
         key = SecretStr(Path(args.openai_api_key_file).read_text(encoding="utf-8").strip())
         return OpenAIAnalyzer(args.openai_base_url, args.model, key, http)
@@ -127,6 +129,7 @@ def main() -> int:
     parser.add_argument("--model", default="llama3.1")
     parser.add_argument("--ollama-url", default="http://127.0.0.1:11434")
     parser.add_argument("--num-ctx", type=int, default=8192)
+    parser.add_argument("--num-thread", type=int, help="Ollama CPU threads (default: its own)")
     parser.add_argument("--openai-base-url", default="https://api.openai.com")
     parser.add_argument("--openai-api-key-file", default=str(ROOT / "secrets" / "openai_api_key"))
     parser.add_argument("--timeout", type=float, default=600)
