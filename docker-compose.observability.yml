@@ -1,17 +1,29 @@
-# Optional overlay: collect log context from the Loki of the observability stack
-# (github.com/ali-fakhrabadi/cloud-native-observability-iac) running on the same host.
+# Optional overlay: join the observability stack on the same host
+# (github.com/ali-fakhrabadi/cloud-native-observability-iac). Its Alertmanager then
+# delivers alerts to the API, and the worker reads log context from its Loki.
 #
 # Enable it in .env:
-#   COMPOSE_FILE=docker-compose.yml:docker-compose.loki.yml
+#   COMPOSE_FILE=docker-compose.yml:docker-compose.observability.yml
 #
-# Only the worker joins that stack's network, and it only reads from Loki's query API.
+# Only the API and the worker join that stack's internal network: the API as
+# `aiops-api` (its endpoints still need their tokens), the worker to query Loki.
 # Any other Loki works too: leave this file out and set AIOPS_LOKI_URL instead.
 
 services:
+  api:
+    networks:
+      backend: {}
+      edge: {}
+      observability:
+        aliases: [aiops-api]
+
   worker:
     environment:
       AIOPS_LOKI_URL: ${AIOPS_LOKI_URL:-http://loki:3100}
-    networks: [backend, edge, observability]
+    networks:
+      backend: {}
+      edge: {}
+      observability: {}
 
 networks:
   observability:

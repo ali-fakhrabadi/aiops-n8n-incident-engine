@@ -78,6 +78,11 @@ times at once to prove it.
   worker. After `max_deliveries` attempts it moves to a dead-letter stream and the
   incident records the failure. Handlers are idempotent: their updates apply only to the
   state they expect.
+* **Two lanes.** Analysis requests have a stream and a consumer loop of their own, one
+  model call at a time; log collection, notifications and all-clears never queue behind
+  a model that needs minutes on a CPU. (Before the split, the first fault drill's message
+  waited 403 s behind other incidents' analyses.) While a handler works, the worker's
+  heartbeat keeps ticking, so a long analysis is not mistaken for a hung worker.
 
 ## Log context
 
@@ -128,7 +133,10 @@ the prompt, so:
 2. Lines sit in a block delimited by markers derived from the incident ID; a line that
    contains the marker is altered, so it cannot close the block.
 3. A budget (150 lines, 12,000 characters) keeps error and warning lines first, then the
-   newest, in time order.
+   newest, in time order. A line that repeats (same level, source and text) is shown
+   once with its count: the first fault drill through the observability stack produced
+   200 identical error lines, and sending 150 copies kept the CPU-bound model busy past
+   its 300 s timeout.
 
 **The answer is checked without trusting the model**, whatever the prompt achieved:
 
@@ -383,9 +391,28 @@ in `secrets/telegram_bot_token`, any numeric `TELEGRAM_CHAT_ID`, then
 On a remote host, reach both through an SSH tunnel:
 `ssh -L 8020:127.0.0.1:8020 -L 5678:127.0.0.1:5678 user@host`.
 
-**Log context** needs a Loki. With the observability stack on the same host, add
-`COMPOSE_FILE=docker-compose.yml:docker-compose.loki.yml` to `.env`: only the worker
-joins that stack's network. For any other Loki, set `AIOPS_LOKI_URL`.
+**With the [observability stack](https://github.com/ali-fakhrabadi/cloud-native-observability-iac)
+on the same host**, add `COMPOSE_FILE=docker-compose.yml:docker-compose.observability.yml`
+to `.env`: the API joins that stack's internal network as `aiops-api`, so its
+Alertmanager can deliver, and the worker reads log context from its Loki. Then, in the
+observability stack's directory, point its `aiops` receiver at the API:
+
+```bash
+cp ../aiops-n8n-incident-engine/secrets/ingest_token secrets/alertmanager_aiops_token
+printf '%s' http://aiops-api:8000/api/v1/alerts/alertmanager > secrets/alertmanager_aiops_url
+docker compose -f docker-compose.observability.yml restart alertmanager
+```
+
+Critical and warning alerts then arrive within about 10 seconds of firing. For any other
+Loki, set `AIOPS_LOKI_URL`; any other Alertmanager needs the receiver shown under
+[API](#api).
+
+The engine analyses and forwards whatever it receives, log lines included (as evidence
+in the chat message). On a shared host, keep alerts about workloads whose logs must not
+leave it (another team's containers, say) out of the `aiops` route with an Alertmanager
+silence or matcher. Alertmanager also remembers what it has sent per receiver: after
+repointing the receiver, alerts it already notified arrive at their next repeat (an
+hour), new ones at once.
 
 ## Development
 
@@ -405,7 +432,7 @@ joins that stack's network. For any other Loki, set `AIOPS_LOKI_URL`.
 | `make telegram-test` / `make telegram-chats` | Check the bot and chat and send a test message / list chat IDs |
 | `make n8n-setup` | Re-import n8n's credentials and workflow, then restart n8n |
 
-230 Python tests with 97% branch coverage, and 13 Code-node tests; CI also checks that
+235 Python tests with 97% branch coverage, and 13 Code-node tests; CI also checks that
 the models and migrations agree (`alembic check`) and runs the smoke test against the
 full stack, from an alert to a (fake) Telegram message, retries included.
 
@@ -421,10 +448,10 @@ full stack, from an alert to a (fake) Telegram message, retries included.
    defences.
 4. **n8n workflow and Telegram** (done): import-ready workflow (Webhook, Code, Switch,
    Telegram nodes) set up automatically, signed webhooks, claim and delivery reports,
-   fake Bot API for CI, `scripts/simulate_alert.py`, `make telegram-test`.
-5. **Measured results**: the observability stack's Alertmanager wired in, end-to-end
-   latency and analysis quality on real fault drills, screenshots and final
-   documentation.
+   fake Bot API for CI, `scripts/simulate_alert.py`, `make telegram-test`, the
+   observability stack's Alertmanager wired in.
+5. **Measured results**: end-to-end latency and analysis quality on real fault drills,
+   screenshots and final documentation.
 
 ## License
 
