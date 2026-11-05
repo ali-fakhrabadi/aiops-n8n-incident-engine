@@ -242,6 +242,14 @@ a link), and the least important sections are dropped first to stay under Telegr
 | n8n to Telegram | The Telegram node has no timeout setting of its own: n8n's HTTP client waits up to five minutes for an answer, so a slow link is waited out rather than cut off. Errors are retried 3 times, 5 s apart (n8n's longest wait between tries), then reported as `failed` |
 | n8n to the engine | The claim 3 times, the report 5 times, a few seconds apart |
 
+**Measured on the lab host** (2026-11-05, `llama3.1` on CPU, the fake Bot API, read off
+the incident timelines): the model took 32 to 39 s per incident (83 s while it was
+loading); from the stored analysis to the delivered message, the hand-off, n8n and the
+Bot API added 0.5 to 1.1 s, and the all-clear arrived 0.7 s after the resolution. With
+two injected 502s the delivery took 10.3 s inside n8n, its two 5 s waits. Real Telegram
+answers the same host's `getMe` and `getChat` in 15 to 21 s over its slow outbound link,
+which is why nothing on the path gives up after a few seconds.
+
 **Metrics.** The worker counts hand-offs by kind and outcome
 (`aiops_notification_handoffs_total`, `aiops_notification_handoff_seconds`); the API
 counts reported outcomes by kind, route and status (`aiops_notifications_total`) and
