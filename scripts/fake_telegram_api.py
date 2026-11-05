@@ -144,6 +144,12 @@ def send_message(state: State, params: dict[str, Any]) -> tuple[int, dict[str, A
                     429, "Too Many Requests: retry after 1", parameters={"retry_after": 1}
                 )
             return _error(state.fail_status, "Bad Gateway")
+        reply_to = params.get("reply_to_message_id")
+        if reply_to not in (None, "") and not any(
+            str(sent["message_id"]) == str(reply_to) and sent["chat_id"] == chat_id
+            for sent in state.messages
+        ):
+            return _error(400, "Bad Request: message to be replied not found")
         message_id = len(state.messages) + 1
         state.messages.append(
             {
@@ -152,6 +158,7 @@ def send_message(state: State, params: dict[str, Any]) -> tuple[int, dict[str, A
                 "text": text,
                 "parse_mode": params.get("parse_mode"),
                 "disable_notification": bool(params.get("disable_notification")),
+                "reply_to_message_id": reply_to,
                 "received_at": time.time(),
             }
         )

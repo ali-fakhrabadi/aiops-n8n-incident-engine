@@ -67,7 +67,7 @@ def test_the_signature_check_expects_the_engine_s_claims() -> None:
 
 
 def test_telegram_is_retried_and_reports_its_errors() -> None:
-    for name in ("Telegram: page on-call", "Telegram: quiet"):
+    for name in ("Telegram: page on-call", "Telegram: quiet", "Telegram: analysis reply"):
         node = _nodes()[name]
         fields = node["parameters"]["additionalFields"]
         assert node["retryOnFail"] is True
@@ -78,6 +78,12 @@ def test_telegram_is_retried_and_reports_its_errors() -> None:
         assert fields["parse_mode"] == "HTML"
         assert "$('Settings')" in node["parameters"]["chatId"]
     assert _nodes()["Telegram: quiet"]["parameters"]["additionalFields"]["disable_notification"]
+    reply = _nodes()["Telegram: analysis reply"]["parameters"]["additionalFields"]
+    assert reply["disable_notification"] is True
+    assert reply["reply_to_message_id"] == "={{ $json.reply_to_message_id }}"
+    page = _nodes()["Telegram: page on-call"]["parameters"]["additionalFields"]
+    assert page["disable_notification"] is False
+    assert "reply_to_message_id" not in page
 
 
 def test_no_chat_id_or_secret_is_committed() -> None:
@@ -106,11 +112,12 @@ def test_every_route_has_its_branch() -> None:
     branches = _workflow()["connections"]["Route by severity"]["main"]
     formatter = (CODE / "format_message.js").read_text(encoding="utf-8")
 
-    assert [rule["outputKey"] for rule in rules] == ["page", "quiet", "suppress"]
+    assert [rule["outputKey"] for rule in rules] == ["page", "quiet", "reply", "suppress"]
     assert [branch[0]["node"] for branch in branches] == [
         "Telegram: page on-call",
         "Telegram: quiet",
+        "Telegram: analysis reply",
         "Delivery outcome",
     ]
-    for route in ("page", "quiet", "suppress"):
-        assert f"return '{route}';" in formatter
+    for route in ("page", "quiet", "reply", "suppress"):
+        assert f"'{route}'" in formatter

@@ -16,14 +16,15 @@ import pytest
 import respx
 from redis.asyncio import Redis
 
-from aiops.analysis.providers import AnalyzerError
+from aiops.analysis.providers import Analyzer, AnalyzerError
+from aiops.incidents.models import Notification
 from aiops.incidents.topics import TOPIC_ANALYZED
 from aiops.notifications.signing import AUDIENCE, ISSUER
 from aiops.worker.notify import NotifyIncident
 from tests.conftest import worker_settings
 from tests.factories import STARTS_AT, alert
 from tests.pipeline import N8N_WEBHOOK, NOW, WEBHOOK_SECRET, Pipeline, Sessions, entries
-from tests.test_analysis_pipeline import StubAnalyzer
+from tests.test_analysis_pipeline import BlockingAnalyzer, StubAnalyzer
 
 pytestmark = pytest.mark.integration
 
@@ -42,7 +43,7 @@ async def make_pipeline(
     built: list[Pipeline] = []
 
     def make(
-        analyzer: StubAnalyzer | None = None, *, notify: bool = True, **overrides: Any
+        analyzer: Analyzer | None = None, *, notify: bool = True, **overrides: Any
     ) -> Pipeline:
         settings = worker_settings(tmp_path, **overrides)
         pipeline = Pipeline(sessions, redis, settings, False, analyzer, notify=notify)
@@ -74,7 +75,7 @@ def _received(request: httpx.Request) -> tuple[dict[str, Any], dict[str, Any]]:
 async def test_an_analysed_incident_is_handed_to_n8n(make_pipeline: MakePipeline) -> None:
     route = respx.post(N8N_WEBHOOK).mock(return_value=ACCEPTED)
     pipeline = make_pipeline()
-    [incident] = await pipeline.deliver(alert(severity="critical"))
+    [incident] = await pipeline.deliver(alert(severity="warning"))
 
     await pipeline.run_until_idle()
 
@@ -91,8 +92,10 @@ async def test_an_analysed_incident_is_handed_to_n8n(make_pipeline: MakePipeline
         "id": str(notification.id),
         "kind": "firing",
         "created_at": NOW.isoformat(),
+        "follows_page": False,
+        "reply_to_message_id": None,
     }
-    assert payload["incident"]["severity"] == "critical"
+    assert payload["incident"]["severity"] == "warning"
     assert payload["incident"]["resolved_at"] is None
     analysis = payload["analysis"]
     assert analysis["status"] == "completed"
@@ -295,3 +298,127 @@ async def test_without_n8n_nothing_is_sent(make_pipeline: MakePipeline) -> None:
         )
         == 1
     )
+
+
+async def _delivered(pipeline: Pipeline, notification_id: uuid.UUID, message_id: str) -> None:
+    """What n8n's delivery report would record."""
+    async with pipeline.sessions() as session, session.begin():
+        row = await session.get_one(Notification, notification_id)
+        row.status = "delivered"
+        row.channel_message_id = message_id
+
+
+def _by_kind(rows: list[Notification]) -> dict[str, Notification]:
+    return {row.kind: row for row in rows}
+
+
+@respx.mock
+async def test_a_critical_alert_pages_before_its_analysis(make_pipeline: MakePipeline) -> None:
+    route = respx.post(N8N_WEBHOOK).mock(return_value=ACCEPTED)
+    analyzer = BlockingAnalyzer()
+    pipeline = make_pipeline(analyzer)
+    [incident] = await pipeline.deliver(alert("TargetDown", severity="critical"))
+
+    await pipeline.relay.publish_batch()
+    await pipeline.consumer.ensure_group()
+    await pipeline.consumer.run_once()  # main lane only: log context and the page
+
+    [page] = await pipeline.notifications(incident.id)
+    assert (page.kind, page.reported_status, page.handed_off_at) == ("page", "firing", NOW)
+    claims, payload = _received(route.calls.last.request)
+    assert claims["jti"] == str(page.id)
+    assert payload["notification"]["kind"] == "page"
+    assert payload["analysis"] == {"status": "pending"}
+    assert not analyzer.started.is_set()  # nobody waited for the model
+
+    await _delivered(pipeline, page.id, "42")
+    analyzer.release.set()
+    await pipeline.run_until_idle()
+
+    sent = _by_kind(await pipeline.notifications(incident.id))
+    assert set(sent) == {"page", "firing"}
+    _, follow_up = _received(route.calls.last.request)
+    assert follow_up["notification"]["kind"] == "firing"
+    assert follow_up["notification"]["follows_page"] is True
+    assert follow_up["notification"]["reply_to_message_id"] == "42"
+    assert follow_up["analysis"]["status"] == "completed"
+
+
+@respx.mock
+async def test_a_page_resolved_before_the_analysis_gets_its_all_clear_at_once(
+    make_pipeline: MakePipeline,
+) -> None:
+    route = respx.post(N8N_WEBHOOK).mock(return_value=ACCEPTED)
+    analyzer = BlockingAnalyzer()
+    pipeline = make_pipeline(analyzer)
+    [incident] = await pipeline.deliver(alert("TargetDown", severity="critical"))
+    await pipeline.relay.publish_batch()
+    await pipeline.consumer.ensure_group()
+    await pipeline.consumer.run_once()  # the page goes out
+
+    await pipeline.deliver(
+        alert(
+            "TargetDown",
+            severity="critical",
+            status="resolved",
+            ends_at=STARTS_AT + timedelta(minutes=3),
+        ),
+        minutes=4,
+    )
+    await pipeline.relay.publish_batch()
+    await pipeline.consumer.run_once()  # the all-clear, the analysis still blocked
+
+    sent = _by_kind(await pipeline.notifications(incident.id))
+    assert set(sent) == {"page", "resolved"}
+    assert sent["resolved"].reported_status == "resolved"
+
+    analyzer.release.set()
+    await pipeline.run_until_idle()  # the analysis follows, for the record
+
+    sent = _by_kind(await pipeline.notifications(incident.id))
+    assert set(sent) == {"page", "resolved", "firing"}
+    assert sent["firing"].reported_status == "resolved"
+    assert route.call_count == 3
+
+
+@respx.mock
+async def test_a_page_is_sent_once(make_pipeline: MakePipeline) -> None:
+    route = respx.post(N8N_WEBHOOK).mock(return_value=ACCEPTED)
+    pipeline = make_pipeline()
+    [incident] = await pipeline.deliver(alert("TargetDown", severity="critical"))
+    await pipeline.run_until_idle()
+    calls = route.call_count
+
+    payload = json.dumps({"incident_id": str(incident.id)})
+    await pipeline.redis.xadd(
+        pipeline.settings.stream_name, {"topic": "incident.page", "payload": payload}
+    )
+    await pipeline.run_until_idle()
+
+    assert route.call_count == calls == 2  # the page and the analysis
+    kinds = sorted(row.kind for row in await pipeline.notifications(incident.id))
+    assert kinds == ["firing", "page"]
+
+
+@respx.mock
+async def test_resolved_before_the_page_went_out_the_analysis_says_so(
+    make_pipeline: MakePipeline,
+) -> None:
+    route = respx.post(N8N_WEBHOOK).mock(return_value=ACCEPTED)
+    pipeline = make_pipeline()
+    [incident] = await pipeline.deliver(alert("TargetDown", severity="critical"))
+    await pipeline.deliver(
+        alert(
+            "TargetDown",
+            severity="critical",
+            status="resolved",
+            ends_at=STARTS_AT + timedelta(minutes=1),
+        ),
+        minutes=2,
+    )
+
+    await pipeline.run_until_idle()
+
+    [notification] = await pipeline.notifications(incident.id)
+    assert (notification.kind, notification.reported_status) == ("firing", "resolved")
+    assert route.call_count == 1  # no page for an alert already over, no separate all-clear

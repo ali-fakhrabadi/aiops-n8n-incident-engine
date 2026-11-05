@@ -80,7 +80,7 @@ def summarise(detail: dict[str, Any], keep_labels: set[str]) -> dict[str, Any]:
             ),
             None,
         )
-        start = detail["starts_at"] if notification["kind"] == "firing" else detail["resolved_at"]
+        start = detail["resolved_at"] if notification["kind"] == "resolved" else detail["starts_at"]
         messages.append(
             {
                 "kind": notification["kind"],
@@ -123,20 +123,23 @@ def summarise(detail: dict[str, Any], keep_labels: set[str]) -> dict[str, Any]:
 
 def markdown(rows: list[dict[str, Any]]) -> str:
     lines = [
-        "| Alert | Severity | Alertmanager | Log lines | Model | Confidence | Checks removed "
-        "| Route | n8n + Telegram | Alert to message |",
-        "|---|---|---|---|---|---|---|---|---|---|",
+        "| Alert | Severity | Alertmanager | Log lines | Page | Model | Confidence "
+        "| Checks removed | Route | n8n + Telegram | Alert to analysis |",
+        "|---|---|---|---|---|---|---|---|---|---|---|",
     ]
+
+    def value(number: float | None, unit: str = " s") -> str:
+        return "-" if number is None else f"{number:g}{unit}"
+
     for row in rows:
-        firing: dict[str, Any] = next((m for m in row["messages"] if m["kind"] == "firing"), {})
+        sent = {message["kind"]: message for message in row["messages"]}
+        firing: dict[str, Any] = sent.get("firing", {})
+        page: dict[str, Any] = sent.get("page", {})
         removed = f"{row['commands_rejected']} cmd, {row['evidence_dropped']} quote"
-
-        def value(number: float | None, unit: str = " s") -> str:
-            return "-" if number is None else f"{number:g}{unit}"
-
         lines.append(
             f"| {row['alertname']} | {row['severity']} | {value(row['alertmanager_seconds'])} "
-            f"| {row['log_lines']} | {value(row['model_seconds'])} | {row['confidence'] or '-'} "
+            f"| {row['log_lines']} | {value(page.get('alert_to_message_seconds'))} "
+            f"| {value(row['model_seconds'])} | {row['confidence'] or '-'} "
             f"| {removed} | {firing.get('route') or '-'} "
             f"| {value(firing.get('seconds_in_channel'))} "
             f"| {value(firing.get('alert_to_message_seconds'))} |"

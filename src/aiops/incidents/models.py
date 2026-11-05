@@ -63,8 +63,9 @@ class AnalysisStatus(StrEnum):
 
 
 class NotificationKind(StrEnum):
-    FIRING = "firing"  # sent once the analysis is done (or has failed)
-    RESOLVED = "resolved"  # the all-clear, unless the firing message already reported it
+    PAGE = "page"  # critical alerts: sent at once, before the analysis
+    FIRING = "firing"  # the analysis (a reply to the page, if there was one)
+    RESOLVED = "resolved"  # the all-clear, unless no message announced the alert as firing
 
 
 class NotificationStatus(StrEnum):

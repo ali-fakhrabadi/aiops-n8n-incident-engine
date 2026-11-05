@@ -137,8 +137,10 @@ class Smoke:
             return f"delivery report with the API token: HTTP {status}"
         return None
 
-    def _incident_through_n8n(self, severity: str) -> tuple[dict[str, Any] | None, str]:
-        """Deliver an alert like Alertmanager does and wait until n8n reports back."""
+    def _incident_through_n8n(
+        self, severity: str, kinds: frozenset[str] = frozenset({"firing"})
+    ) -> tuple[dict[str, Any] | None, str]:
+        """Deliver an alert like Alertmanager does; wait until n8n reports on `kinds`."""
         alertname = f"SmokeTest{severity.capitalize()}"
         alert = {
             "status": "firing",
@@ -172,7 +174,8 @@ class Smoke:
         detail: Any = None
         while time.monotonic() < deadline:
             detail = fetch(incident_url, self.api_auth).json()
-            if any(item["status"] in FINAL for item in detail["notifications"]):
+            reported = {n["kind"] for n in detail["notifications"] if n["status"] in FINAL}
+            if kinds <= reported:
                 return detail, ""
             time.sleep(0.5)
         state = (
@@ -183,13 +186,14 @@ class Smoke:
         return None, f"no delivery report within {self.pipeline_timeout:.0f} s ({state})"
 
     @staticmethod
-    def _timeline_problem(detail: dict[str, Any], outcome: str) -> str | None:
+    def _missing_events(detail: dict[str, Any], *expected: str) -> str | None:
+        """Every expected event is on the timeline (hand-offs and reports race each other)."""
         kinds = [event["kind"] for event in detail["events"]]
-        # The worker records the hand-off and n8n reports the outcome concurrently.
-        expected = ["opened", "context_collected", "analysis_completed"]
-        if kinds[:3] != expected or sorted(kinds[3:]) != sorted(["notification_sent", outcome]):
-            return f"timeline {kinds}"
-        return None
+        missing = list(expected)
+        for kind in kinds:
+            if kind in missing:
+                missing.remove(kind)
+        return f"timeline {kinds}, missing {missing}" if missing else None
 
     def alert_flows_through_the_pipeline(self) -> str | None:
         """Info alerts go all the way through n8n, which records them without sending."""
@@ -199,18 +203,37 @@ class Smoke:
         notification = detail["notifications"][0]
         if (notification["status"], notification["route"]) != ("suppressed", "suppress"):
             return f"notification {notification}"
-        return self._timeline_problem(detail, "notification_suppressed")
+        return self._missing_events(
+            detail,
+            "opened",
+            "context_collected",
+            "analysis_completed",
+            "notification_sent",
+            "notification_suppressed",
+        )
 
     def critical_alert_reaches_telegram(self) -> str | None:
-        detail, problem = self._incident_through_n8n("critical")
+        """A page with sound at once, then the analysis as a silent reply to it."""
+        detail, problem = self._incident_through_n8n("critical", frozenset({"page", "firing"}))
         if detail is None:
             return problem
-        notification = detail["notifications"][0]
-        if notification["status"] != "delivered" or not notification["channel_message_id"]:
-            return f"notification {notification}"
-        if notification["route"] != "page":
-            return f"routed to {notification['route']}, expected page"
-        return self._timeline_problem(detail, "notification_delivered")
+        sent = {n["kind"]: n for n in detail["notifications"]}
+        for kind, route in (("page", "page"), ("firing", "reply")):
+            notification = sent[kind]
+            if notification["status"] != "delivered" or not notification["channel_message_id"]:
+                return f"{kind}: {notification}"
+            if notification["route"] != route:
+                return f"{kind} routed to {notification['route']}, expected {route}"
+        return self._missing_events(
+            detail,
+            "opened",
+            "context_collected",
+            "analysis_completed",
+            "notification_sent",
+            "notification_sent",
+            "notification_delivered",
+            "notification_delivered",
+        )
 
     @staticmethod
     def _fake_telegram(path: str, body: object | None = None) -> Any:
@@ -231,25 +254,35 @@ class Smoke:
         return json.loads(result.stdout)
 
     def fake_telegram_got_a_valid_page(self) -> str | None:
-        """The page from the previous check, as the fake Bot API (Telegram's rules) saw it."""
+        """The previous check's messages, as the fake Bot API (Telegram's rules) saw them."""
         messages = self._fake_telegram("/_test/messages")["messages"]
-        pages = [message for message in messages if "SmokeTestCritical" in message["text"]]
+        about = [message for message in messages if "SmokeTestCritical" in message["text"]]
+        pages = [m for m in about if "Analysis follows" in m["text"]]
         if not pages:
-            return f"no message about SmokeTestCritical among {len(messages)}"
-        last = pages[-1]
-        if last["parse_mode"] != "HTML" or last["disable_notification"]:
-            return f"parse_mode {last['parse_mode']}, silent {last['disable_notification']}"
+            return f"no page about SmokeTestCritical among {len(messages)} messages"
+        page = pages[-1]
+        if page["parse_mode"] != "HTML" or page["disable_notification"]:
+            return f"page: parse_mode {page['parse_mode']}, silent {page['disable_notification']}"
+        replies = [m for m in about if str(m["reply_to_message_id"]) == str(page["message_id"])]
+        if not replies or not replies[-1]["disable_notification"]:
+            return "no silent analysis replying to the page"
         return None
 
     def telegram_failures_are_retried(self) -> str | None:
         """The fake Bot API fails twice (502); n8n's retries still deliver the page."""
         self._fake_telegram("/_test/faults", {"status": 502, "count": 2})
-        detail, problem = self._incident_through_n8n("critical")
+        detail, problem = self._incident_through_n8n("critical", frozenset({"page"}))
         if detail is None:
             return problem
-        if detail["notifications"][0]["status"] != "delivered":
-            return f"notification {detail['notifications'][0]}"
-        [delivered] = [e for e in detail["events"] if e["kind"] == "notification_delivered"]
+        page = next(n for n in detail["notifications"] if n["kind"] == "page")
+        if page["status"] != "delivered":
+            return f"page {page}"
+        [delivered] = [
+            event
+            for event in detail["events"]
+            if event["kind"] == "notification_delivered"
+            and event["details"]["notification_id"] == page["id"]
+        ]
         seconds = delivered["details"]["seconds_in_channel"]
         return None if seconds >= RETRY_WAITS else f"delivered after {seconds} s: no retries?"
 
@@ -365,13 +398,16 @@ def main() -> int:
     if args.telegram or args.fake_telegram:
         checks.append(
             (
-                "A critical alert pages on-call through Telegram",
+                "A critical alert pages at once, the analysis follows as a reply",
                 smoke.critical_alert_reaches_telegram,
             )
         )
     if args.fake_telegram:
         checks += [
-            ("Telegram got valid HTML, with sound", smoke.fake_telegram_got_a_valid_page),
+            (
+                "Telegram got a valid page with sound and a silent reply",
+                smoke.fake_telegram_got_a_valid_page,
+            ),
             ("Telegram failures are retried by n8n", smoke.telegram_failures_are_retried),
         ]
     checks += [

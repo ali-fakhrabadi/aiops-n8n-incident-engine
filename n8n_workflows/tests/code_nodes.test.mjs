@@ -252,6 +252,50 @@ test('a failed analysis says why, and withheld commands are counted', async () =
   assert.match(withheld.text, /2 suggested command\(s\) withheld: not read-only/);
 });
 
+test('a page goes out with sound and without an analysis', async () => {
+  const page = payload({
+    notification: { id: 'n-0', kind: 'page' },
+    analysis: { status: 'pending' },
+  });
+
+  const message = await format(page);
+
+  assert.equal(message.route, 'page');
+  assert.equal(message.disable_notification, false);
+  assert.equal(message.reply_to_message_id, null);
+  assertTelegramHtml(message.text);
+  assert.match(message.text, /^🔴 <b>CRITICAL<\/b> · <b>ContainerRestarting<\/b>/);
+  assert.match(message.text, /<i>Analysis follows\.<\/i>/);
+  assert.doesNotMatch(message.text, /Probable cause/);
+});
+
+test('the analysis after a page is a silent reply to it', async () => {
+  const followUp = payload({
+    notification: { id: 'n-1', kind: 'firing', follows_page: true, reply_to_message_id: '42' },
+  });
+
+  const message = await format(followUp);
+
+  assert.equal(message.route, 'reply');
+  assert.equal(message.disable_notification, true);
+  assert.equal(message.reply_to_message_id, 42);
+  assertTelegramHtml(message.text);
+  assert.match(message.text, /^🔎 <b>Analysis<\/b> · <b>ContainerRestarting<\/b>\nStill firing since/);
+  assert.match(message.text, /<b>Probable cause<\/b>/);
+  assert.doesNotMatch(message.text, /compose_project=/); // the page already said where
+});
+
+test('without the page message ID the analysis still goes out, silently', async () => {
+  const followUp = payload({
+    notification: { id: 'n-1', kind: 'firing', follows_page: true, reply_to_message_id: null },
+  });
+
+  const message = await format(followUp);
+
+  assert.equal(message.route, 'quiet');
+  assert.equal(message.reply_to_message_id, null);
+});
+
 async function outcome(route, json) {
   const nodes = { 'Format message': { route, notification_id: 'n-1' } };
   return (await run('delivery_outcome.js', { nodes, json })).json;

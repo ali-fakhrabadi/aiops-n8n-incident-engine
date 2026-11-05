@@ -20,7 +20,7 @@ from aiops import __version__
 from aiops.analysis.providers import build_analyzer
 from aiops.config import WorkerSettings
 from aiops.db.engine import create_database_engine
-from aiops.incidents.topics import TOPIC_ANALYZED, TOPIC_RESOLVED
+from aiops.incidents.topics import TOPIC_ANALYZED, TOPIC_PAGE, TOPIC_RESOLVED
 from aiops.logcontext.loki import LokiClient
 from aiops.logs import configure_logging
 from aiops.metrics import create_registry
@@ -71,6 +71,7 @@ async def run(settings: WorkerSettings, stop: asyncio.Event | None = None) -> No
     analyze = AnalyzeIncident(sessions, analyzer, settings, metrics)
     handlers: list[Handler] = [
         CollectLogContext(sessions, loki, settings, metrics),
+        NotifyIncident(TOPIC_PAGE, sessions, n8n, metrics),
         NotifyIncident(TOPIC_ANALYZED, sessions, n8n, metrics),
         NotifyIncident(TOPIC_RESOLVED, sessions, n8n, metrics),
         # Analysis requests published to this stream before analysis had a lane of its own.

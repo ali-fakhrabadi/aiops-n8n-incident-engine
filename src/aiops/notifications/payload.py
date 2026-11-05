@@ -12,7 +12,13 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any
 
-from aiops.incidents.models import AnalysisStatus, Incident, IncidentStatus, Notification
+from aiops.incidents.models import (
+    AnalysisStatus,
+    Incident,
+    IncidentStatus,
+    Notification,
+    NotificationStatus,
+)
 
 PAYLOAD_VERSION = 1
 
@@ -50,14 +56,25 @@ def _analysis(incident: Incident) -> dict[str, Any]:
     return analysis
 
 
-def notification_payload(incident: Incident, notification: Notification) -> dict[str, Any]:
+def notification_payload(
+    incident: Incident, notification: Notification, page: Notification | None = None
+) -> dict[str, Any]:
+    """`page` is the incident's page, for the analysis that follows it."""
     resolved = notification.reported_status == IncidentStatus.RESOLVED
+    reply_to = (
+        page.channel_message_id
+        if page is not None and page.status == NotificationStatus.DELIVERED
+        else None
+    )
     return {
         "version": PAYLOAD_VERSION,
         "notification": {
             "id": str(notification.id),
             "kind": notification.kind,
             "created_at": _iso(notification.created_at),
+            # On-call has been paged already: the analysis goes out silently, as a reply.
+            "follows_page": page is not None,
+            "reply_to_message_id": reply_to,
         },
         "incident": {
             "id": str(incident.id),

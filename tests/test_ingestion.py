@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from datetime import timedelta
+from typing import Any
 
 import httpx
 import pytest
@@ -215,3 +216,30 @@ async def test_concurrent_duplicate_deliveries_open_one_incident(
     async with sessions() as session:
         outbox = await session.scalar(select(func.count()).select_from(OutboxMessage))
     assert outbox == 2
+
+
+@pytest.mark.integration
+@pytest.mark.parametrize(
+    ("delivered", "topics"),
+    [
+        (alert(severity="critical"), ["incident.opened", "incident.page"]),
+        (alert(severity="warning"), ["incident.opened"]),
+        (
+            alert(severity="critical", status="resolved", ends_at=STARTS_AT + timedelta(minutes=1)),
+            [],
+        ),
+    ],
+    ids=["critical-pages-at-once", "warning-waits-for-its-analysis", "resolved-on-arrival"],
+)
+async def test_only_a_firing_critical_alert_pages_at_once(
+    api: httpx.AsyncClient,
+    sessions: Sessions,
+    ingest_headers: dict[str, str],
+    delivered: dict[str, Any],
+    topics: list[str],
+) -> None:
+    response = await api.post(URL, json=webhook(delivered), headers=ingest_headers)
+
+    assert response.status_code == 200
+    # (An alert resolved on arrival may queue its all-clear; it never pages.)
+    assert [topic for topic in await _outbox(sessions) if topic != "incident.resolved"] == topics

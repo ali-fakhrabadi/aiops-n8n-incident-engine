@@ -32,8 +32,9 @@ from aiops.incidents.models import (
     IncidentEvent,
     IncidentStatus,
     OutboxMessage,
+    Severity,
 )
-from aiops.incidents.topics import TOPIC_OPENED, TOPIC_RESOLVED
+from aiops.incidents.topics import TOPIC_OPENED, TOPIC_PAGE, TOPIC_RESOLVED
 
 
 class Outcome(StrEnum):
@@ -176,6 +177,11 @@ class _Delivery:
             self.session.add(
                 OutboxMessage(topic=TOPIC_OPENED, payload={"incident_id": str(incident_id)})
             )
+            if alert.severity == Severity.CRITICAL and not flapping:
+                # On-call hears about it now; the analysis follows when the model is done.
+                self.session.add(
+                    OutboxMessage(topic=TOPIC_PAGE, payload={"incident_id": str(incident_id)})
+                )
         self.session.add(
             IncidentEvent(incident_id=incident_id, kind=EventKind.OPENED, details=details)
         )

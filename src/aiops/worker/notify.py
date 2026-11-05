@@ -1,12 +1,15 @@
 """Notification stage: hand each incident to n8n, once per message kind.
 
-Two messages per incident at most: the firing message once the analysis is done (or has
-failed), and the all-clear when the alert resolves. When the alert resolves before the
-analysis is done, the firing message reports the resolution and no all-clear follows.
+Up to three messages per incident:
 
-Which of the two applies is decided under a lock on the incident row, the same row the
-ingestion updates when the alert resolves; so the two handlers cannot both decide that
-the other one will report the resolution.
+* the page (critical alerts only, not flapping): sent at once, before any analysis;
+* the analysis, once it is done (or has failed): a reply to the page, if there was one;
+* the all-clear when the alert resolves, if a message announced it as firing. When the
+  alert resolves before any message went out, the analysis reports the resolution.
+
+Which of them applies is decided under a lock on the incident row, the same row the
+ingestion updates when the alert resolves; so no two handlers can both decide that the
+other one will report the resolution.
 """
 
 from __future__ import annotations
@@ -30,7 +33,7 @@ from aiops.incidents.models import (
     NotificationKind,
     NotificationStatus,
 )
-from aiops.incidents.topics import TOPIC_ANALYZED, TOPIC_RESOLVED
+from aiops.incidents.topics import TOPIC_ANALYZED, TOPIC_PAGE, TOPIC_RESOLVED
 from aiops.notifications.client import N8nClient, NotifierRejectedError, NotifierUnavailableError
 from aiops.notifications.payload import notification_payload
 from aiops.worker.handlers import PermanentError, incident_id_of
@@ -38,7 +41,11 @@ from aiops.worker.metrics import WorkerMetrics
 
 logger = logging.getLogger(__name__)
 
-TOPIC_KINDS = {TOPIC_ANALYZED: NotificationKind.FIRING, TOPIC_RESOLVED: NotificationKind.RESOLVED}
+TOPIC_KINDS = {
+    TOPIC_PAGE: NotificationKind.PAGE,
+    TOPIC_ANALYZED: NotificationKind.FIRING,
+    TOPIC_RESOLVED: NotificationKind.RESOLVED,
+}
 
 
 class NotifyIncident:
@@ -89,18 +96,30 @@ class NotifyIncident:
             if incident is None:
                 msg = f"incident {incident_id} does not exist"
                 raise PermanentError(msg)
-            existing = await self._notification(session, incident_id, self._kind)
+            sent = {
+                NotificationKind(row.kind): row
+                for row in await session.scalars(
+                    select(Notification).where(Notification.incident_id == incident_id)
+                )
+            }
+            # The analysis answers the page in the chat, when there was one.
+            page = (
+                sent.get(NotificationKind.PAGE) if self._kind == NotificationKind.FIRING else None
+            )
+            existing = sent.pop(self._kind, None)
             if existing is not None:
                 if existing.status == NotificationStatus.PENDING and existing.handed_off_at is None:
                     # Recorded, but n8n never accepted it: a retry, or a worker that died.
-                    return existing.id, notification_payload(incident, existing)
+                    return existing.id, notification_payload(incident, existing, page)
                 return None  # a redelivery of work already done
+            if self._kind == NotificationKind.PAGE and incident.status != IncidentStatus.FIRING:
+                return None  # resolved before the page went out: the analysis reports it
             if self._kind == NotificationKind.RESOLVED:
-                firing = await self._notification(session, incident_id, NotificationKind.FIRING)
-                if firing is None:
-                    return None  # the firing message will report the resolution
-                if firing.reported_status == IncidentStatus.RESOLVED:
-                    return None  # it already did
+                reported = {row.reported_status for row in sent.values()}
+                if IncidentStatus.FIRING not in reported:
+                    return None  # nothing announced it yet: the analysis reports the resolution
+                if IncidentStatus.RESOLVED in reported:
+                    return None  # a message already reported it
             notification = Notification(
                 id=uuid.uuid4(),
                 incident_id=incident_id,
@@ -111,17 +130,7 @@ class NotifyIncident:
                 handoff_attempts=0,
             )
             session.add(notification)
-            return notification.id, notification_payload(incident, notification)
-
-    @staticmethod
-    async def _notification(
-        session: AsyncSession, incident_id: uuid.UUID, kind: NotificationKind
-    ) -> Notification | None:
-        return await session.scalar(
-            select(Notification).where(
-                Notification.incident_id == incident_id, Notification.kind == kind
-            )
-        )
+            return notification.id, notification_payload(incident, notification, page)
 
     async def _hand_off(
         self,

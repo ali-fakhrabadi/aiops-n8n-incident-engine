@@ -20,7 +20,7 @@
     },
     {
       "parameters": {
-        "content": "## 2. Claim, route, send\nThe engine is asked first: a notification can be claimed once, so a repeated webhook never sends twice. Critical and firing pages on-call with sound; other critical or warning alerts (resolved, flapping) are sent silently; info is recorded only. Telegram calls are retried 3 times, 5 s apart.",
+        "content": "## 2. Claim, route, send\nThe engine is asked first: a notification can be claimed once, so a repeated webhook never sends twice. A critical alert pages on-call with sound at once, before any analysis; the analysis follows silently, as a reply to the page. Other critical or warning alerts (resolved, flapping) are sent silently; info is recorded only. Telegram calls are retried 3 times, 5 s apart.",
         "width": 1080,
         "height": 300,
         "color": 7
@@ -267,7 +267,7 @@
     },
     {
       "parameters": {
-        "jsCode": "// Code node \"Format message\" (run once for all items).\n//\n// Picks the route and builds the Telegram message (HTML parse mode). Every value from\n// the payload is escaped: alert labels, log quotes and model output can contain\n// anything, including markup meant to fake a message or hide a link.\n//\n// Routes (the Switch node after this one sends each to its own branch):\n//   page      critical and firing, not flapping: a message with sound\n//   quiet     any other critical or warning (flapping, resolved): a silent message\n//   suppress  info and everything else: recorded, not sent\nconst MAX_LENGTH = 4096; // Telegram's limit for one message\nconst LABELS = ['compose_project', 'compose_service', 'container', 'service', 'instance', 'job'];\nconst ICONS = { critical: '🔴', warning: '🟠', info: '🔵' };\n\nconst { notification, incident, analysis } = $('Verify signed payload').first().json;\n\nfunction escape(value) {\n  return String(value ?? '')\n    .replace(/&/g, '&amp;')\n    .replace(/</g, '&lt;')\n    .replace(/>/g, '&gt;');\n}\n\n// Shorten before escaping, so an entity is never cut in half.\nfunction clip(value, max) {\n  const text = String(value ?? '').trim();\n  return text.length > max ? `${text.slice(0, max - 1)}…` : text;\n}\n\nfunction route() {\n  const severity = incident.severity;\n  if (severity === 'critical' && incident.status === 'firing' && !incident.flapping) {\n    return 'page';\n  }\n  if (severity === 'critical' || severity === 'warning') {\n    return 'quiet';\n  }\n  return 'suppress';\n}\n\nfunction clock(iso) {\n  return iso ? `${iso.slice(0, 10)} ${iso.slice(11, 16)} UTC` : 'unknown';\n}\n\nfunction duration(fromIso, toIso) {\n  const seconds = Math.max(0, Math.round((Date.parse(toIso) - Date.parse(fromIso)) / 1000));\n  if (Number.isNaN(seconds)) return 'unknown';\n  if (seconds < 120) return `${seconds} s`;\n  if (seconds < 7200) return `${Math.round(seconds / 60)} min`;\n  return `${(seconds / 3600).toFixed(1)} h`;\n}\n\nfunction header() {\n  const resolved = incident.status === 'resolved';\n  const icon = resolved ? '✅' : ICONS[incident.severity] || '⚪';\n  const state = resolved ? 'RESOLVED' : String(incident.severity || 'unknown').toUpperCase();\n  const lines = [`${icon} <b>${escape(state)}</b> · <b>${escape(clip(incident.alertname, 120))}</b>`];\n  const annotations = incident.annotations || {};\n  if (annotations.summary) lines.push(`<i>${escape(clip(annotations.summary, 300))}</i>`);\n  const labels = incident.labels || {};\n  const where = LABELS.filter((key) => labels[key])\n    .slice(0, 4)\n    .map((key) => `${escape(key)}=<code>${escape(clip(labels[key], 80))}</code>`);\n  if (where.length) lines.push(where.join(' · '));\n  let when = `Started ${clock(incident.starts_at)}`;\n  if (resolved && incident.resolved_at) {\n    when += `, resolved after ${duration(incident.starts_at, incident.resolved_at)}`;\n  }\n  lines.push(when);\n  if (incident.flapping) lines.push('⚠️ Flapping: this alert keeps firing and resolving.');\n  return lines.join('\\n');\n}\n\n// Sections in order of importance: the last ones are dropped first when too long.\nfunction analysisSections() {\n  if (!analysis || analysis.status === 'skipped' || analysis.status === 'pending') return [];\n  if (analysis.status === 'failed') {\n    return [`<i>No analysis: ${escape(clip(analysis.reason || 'unknown reason', 300))}</i>`];\n  }\n  const source = [analysis.provider, analysis.model].filter(Boolean).join(' ');\n  const sections = [\n    `<b>Probable cause</b> (${escape(analysis.confidence || 'unknown')} confidence, ` +\n      `${escape(source)})\\n${escape(clip(analysis.probable_cause || analysis.summary, 1200))}`,\n  ];\n  const commands = (analysis.suggested_commands || []).slice(0, 6);\n  if (commands.length) {\n    const block = commands.map((item) => escape(clip(item.command, 200))).join('\\n');\n    sections.push(`<b>Read-only checks</b>\\n<pre>${block}</pre>`);\n  }\n  const evidence = (analysis.evidence || []).slice(0, 3);\n  if (evidence.length) {\n    const quotes = evidence.map((item) => `• <code>${escape(clip(item.quote, 200))}</code>`);\n    sections.push(`<b>Evidence</b>\\n${quotes.join('\\n')}`);\n  }\n  const steps = (analysis.next_steps || []).slice(0, 4);\n  if (steps.length) {\n    const list = steps.map((step, index) => `${index + 1}. ${escape(clip(step, 200))}`);\n    sections.push(`<b>Next steps</b>\\n${list.join('\\n')}`);\n  }\n  if (analysis.commands_rejected > 0) {\n    sections.push(`<i>${analysis.commands_rejected} suggested command(s) withheld: not read-only.</i>`);\n  }\n  return sections;\n}\n\nfunction message() {\n  const footer = `Incident <code>${escape(incident.id)}</code>`;\n  // The all-clear is short; the firing message carries the analysis.\n  const sections = notification.kind === 'resolved' ? [] : analysisSections();\n  // Header and footer are clipped field by field and stay far below the limit.\n  let text = [header(), ...sections, footer].join('\\n\\n');\n  while (text.length > MAX_LENGTH && sections.length) {\n    sections.pop();\n    text = [header(), ...sections, footer].join('\\n\\n');\n  }\n  return text;\n}\n\nconst chosen = route();\nreturn [\n  {\n    json: {\n      route: chosen,\n      disable_notification: chosen !== 'page',\n      text: message(),\n      notification_id: notification.id,\n      incident_id: incident.id,\n      kind: notification.kind,\n    },\n  },\n];\n"
+        "jsCode": "// Code node \"Format message\" (run once for all items).\n//\n// Picks the route and builds the Telegram message (HTML parse mode). Every value from\n// the payload is escaped: alert labels, log quotes and model output can contain\n// anything, including markup meant to fake a message or hide a link.\n//\n// Routes (the Switch node after this one sends each to its own branch):\n//   page      critical and firing, not flapping: a message with sound. The engine sends\n//             these at once, before any analysis, as their own message kind (\"page\")\n//   reply     the analysis that follows a page: silent, a reply to the page in the chat\n//   quiet     any other critical or warning (flapping, resolved): a silent message\n//   suppress  info and everything else: recorded, not sent\nconst MAX_LENGTH = 4096; // Telegram's limit for one message\nconst LABELS = ['compose_project', 'compose_service', 'container', 'service', 'instance', 'job'];\nconst ICONS = { critical: '🔴', warning: '🟠', info: '🔵' };\n\nconst { notification, incident, analysis } = $('Verify signed payload').first().json;\n\nfunction escape(value) {\n  return String(value ?? '')\n    .replace(/&/g, '&amp;')\n    .replace(/</g, '&lt;')\n    .replace(/>/g, '&gt;');\n}\n\n// Shorten before escaping, so an entity is never cut in half.\nfunction clip(value, max) {\n  const text = String(value ?? '').trim();\n  return text.length > max ? `${text.slice(0, max - 1)}…` : text;\n}\n\nfunction route() {\n  if (notification.kind === 'page') return 'page';\n  if (notification.follows_page) {\n    // Without the page's message ID (its delivery failed) there is nothing to reply to.\n    return notification.reply_to_message_id ? 'reply' : 'quiet';\n  }\n  const severity = incident.severity;\n  if (severity === 'critical' && incident.status === 'firing' && !incident.flapping) {\n    return 'page';\n  }\n  if (severity === 'critical' || severity === 'warning') {\n    return 'quiet';\n  }\n  return 'suppress';\n}\n\nfunction clock(iso) {\n  return iso ? `${iso.slice(0, 10)} ${iso.slice(11, 16)} UTC` : 'unknown';\n}\n\nfunction duration(fromIso, toIso) {\n  const seconds = Math.max(0, Math.round((Date.parse(toIso) - Date.parse(fromIso)) / 1000));\n  if (Number.isNaN(seconds)) return 'unknown';\n  if (seconds < 120) return `${seconds} s`;\n  if (seconds < 7200) return `${Math.round(seconds / 60)} min`;\n  return `${(seconds / 3600).toFixed(1)} h`;\n}\n\nfunction header() {\n  const resolved = incident.status === 'resolved';\n  const icon = resolved ? '✅' : ICONS[incident.severity] || '⚪';\n  const state = resolved ? 'RESOLVED' : String(incident.severity || 'unknown').toUpperCase();\n  const lines = [`${icon} <b>${escape(state)}</b> · <b>${escape(clip(incident.alertname, 120))}</b>`];\n  const annotations = incident.annotations || {};\n  if (annotations.summary) lines.push(`<i>${escape(clip(annotations.summary, 300))}</i>`);\n  const labels = incident.labels || {};\n  const where = LABELS.filter((key) => labels[key])\n    .slice(0, 4)\n    .map((key) => `${escape(key)}=<code>${escape(clip(labels[key], 80))}</code>`);\n  if (where.length) lines.push(where.join(' · '));\n  let when = `Started ${clock(incident.starts_at)}`;\n  if (resolved && incident.resolved_at) {\n    when += `, resolved after ${duration(incident.starts_at, incident.resolved_at)}`;\n  }\n  lines.push(when);\n  if (incident.flapping) lines.push('⚠️ Flapping: this alert keeps firing and resolving.');\n  return lines.join('\\n');\n}\n\n// Sections in order of importance: the last ones are dropped first when too long.\nfunction analysisSections() {\n  if (!analysis || analysis.status === 'skipped' || analysis.status === 'pending') return [];\n  if (analysis.status === 'failed') {\n    return [`<i>No analysis: ${escape(clip(analysis.reason || 'unknown reason', 300))}</i>`];\n  }\n  const source = [analysis.provider, analysis.model].filter(Boolean).join(' ');\n  const sections = [\n    `<b>Probable cause</b> (${escape(analysis.confidence || 'unknown')} confidence, ` +\n      `${escape(source)})\\n${escape(clip(analysis.probable_cause || analysis.summary, 1200))}`,\n  ];\n  const commands = (analysis.suggested_commands || []).slice(0, 6);\n  if (commands.length) {\n    const block = commands.map((item) => escape(clip(item.command, 200))).join('\\n');\n    sections.push(`<b>Read-only checks</b>\\n<pre>${block}</pre>`);\n  }\n  const evidence = (analysis.evidence || []).slice(0, 3);\n  if (evidence.length) {\n    const quotes = evidence.map((item) => `• <code>${escape(clip(item.quote, 200))}</code>`);\n    sections.push(`<b>Evidence</b>\\n${quotes.join('\\n')}`);\n  }\n  const steps = (analysis.next_steps || []).slice(0, 4);\n  if (steps.length) {\n    const list = steps.map((step, index) => `${index + 1}. ${escape(clip(step, 200))}`);\n    sections.push(`<b>Next steps</b>\\n${list.join('\\n')}`);\n  }\n  if (analysis.commands_rejected > 0) {\n    sections.push(`<i>${analysis.commands_rejected} suggested command(s) withheld: not read-only.</i>`);\n  }\n  return sections;\n}\n\n// The analysis that follows a page: the page already said what fires and where.\nfunction followUpHeader() {\n  const lines = [`🔎 <b>Analysis</b> · <b>${escape(clip(incident.alertname, 120))}</b>`];\n  if (incident.status === 'resolved' && incident.resolved_at) {\n    lines.push(`Resolved after ${duration(incident.starts_at, incident.resolved_at)}`);\n  } else {\n    lines.push(`Still firing since ${clock(incident.starts_at)}`);\n  }\n  return lines.join('\\n');\n}\n\nfunction message() {\n  const footer = `Incident <code>${escape(incident.id)}</code>`;\n  if (notification.kind === 'page') {\n    return [header(), '<i>Analysis follows.</i>', footer].join('\\n\\n');\n  }\n  const top = notification.follows_page ? followUpHeader() : header();\n  // The all-clear is short; the firing message carries the analysis.\n  const sections = notification.kind === 'resolved' ? [] : analysisSections();\n  // Header and footer are clipped field by field and stay far below the limit.\n  let text = [top, ...sections, footer].join('\\n\\n');\n  while (text.length > MAX_LENGTH && sections.length) {\n    sections.pop();\n    text = [top, ...sections, footer].join('\\n\\n');\n  }\n  return text;\n}\n\nconst chosen = route();\nreturn [\n  {\n    json: {\n      route: chosen,\n      disable_notification: chosen !== 'page',\n      reply_to_message_id: chosen === 'reply' ? Number(notification.reply_to_message_id) : null,\n      text: message(),\n      notification_id: notification.id,\n      incident_id: incident.id,\n      kind: notification.kind,\n    },\n  },\n];\n"
       },
       "id": "83c712fd-864b-5d79-8b89-c01f8ffcce13",
       "name": "Format message",
@@ -340,6 +340,30 @@
                 },
                 "conditions": [
                   {
+                    "id": "7d35514b-e587-5b38-84a7-e5212df47832",
+                    "leftValue": "={{ $json.route }}",
+                    "rightValue": "reply",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "reply"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 2
+                },
+                "conditions": [
+                  {
                     "id": "756df64d-9388-53a2-bb73-6d300fe34964",
                     "leftValue": "={{ $json.route }}",
                     "rightValue": "suppress",
@@ -386,7 +410,7 @@
       "typeVersion": 1.2,
       "position": [
         1980,
-        -60
+        -120
       ],
       "credentials": {
         "telegramApi": {
@@ -418,7 +442,40 @@
       "typeVersion": 1.2,
       "position": [
         1980,
-        160
+        60
+      ],
+      "credentials": {
+        "telegramApi": {
+          "id": "aiopsTelegramBt1",
+          "name": "Telegram bot"
+        }
+      },
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 5000,
+      "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {
+        "resource": "message",
+        "operation": "sendMessage",
+        "chatId": "={{ $('Settings').first().json.telegram_chat_id }}",
+        "text": "={{ $json.text }}",
+        "additionalFields": {
+          "appendAttribution": false,
+          "disable_notification": true,
+          "disable_web_page_preview": true,
+          "parse_mode": "HTML",
+          "reply_to_message_id": "={{ $json.reply_to_message_id }}"
+        }
+      },
+      "id": "d3dbd0e5-1e7a-559b-a863-486c3b482ce7",
+      "name": "Telegram: analysis reply",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        1980,
+        240
       ],
       "credentials": {
         "telegramApi": {
@@ -598,6 +655,13 @@
         ],
         [
           {
+            "node": "Telegram: analysis reply",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
             "node": "Delivery outcome",
             "type": "main",
             "index": 0
@@ -624,6 +688,24 @@
       ]
     },
     "Telegram: quiet": {
+      "main": [
+        [
+          {
+            "node": "Delivery outcome",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Delivery outcome",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Telegram: analysis reply": {
       "main": [
         [
           {

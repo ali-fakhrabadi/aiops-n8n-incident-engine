@@ -275,7 +275,12 @@ async def test_analysis_requests_have_lanes_of_their_own(make_pipeline: MakePipe
     main = await entries(pipeline.redis, pipeline.settings.stream_name)
     lane = await entries(pipeline.redis, pipeline.settings.analysis_stream_name)
     first = await entries(pipeline.redis, pipeline.settings.critical_analysis_stream_name)
-    assert [fields["topic"] for _, fields in main] == ["incident.opened"] * 2
+    # The critical one also pages at once, in the main lane.
+    assert sorted(fields["topic"] for _, fields in main) == [
+        "incident.opened",
+        "incident.opened",
+        "incident.page",
+    ]
     assert [json.loads(fields["payload"])["severity"] for _, fields in lane] == ["warning"]
     assert [json.loads(fields["payload"])["severity"] for _, fields in first] == ["critical"]
 

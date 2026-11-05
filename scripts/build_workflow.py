@@ -109,7 +109,18 @@ def callback_request(url_tail: str, body: str, *, full_response: bool) -> dict[s
     }
 
 
-def telegram(name: str, position: tuple[int, int], *, silent: bool) -> dict[str, Any]:
+def telegram(
+    name: str, position: tuple[int, int], *, silent: bool, reply: bool = False
+) -> dict[str, Any]:
+    fields: dict[str, Any] = {
+        "appendAttribution": False,
+        "disable_notification": silent,
+        "disable_web_page_preview": True,
+        "parse_mode": "HTML",
+    }
+    if reply:
+        # The analysis answers the page it follows, so the two stay together in the chat.
+        fields["reply_to_message_id"] = "={{ $json.reply_to_message_id }}"
     return node(
         name,
         "telegram",
@@ -120,12 +131,7 @@ def telegram(name: str, position: tuple[int, int], *, silent: bool) -> dict[str,
             "operation": "sendMessage",
             "chatId": f"={{{{ {SETTINGS_EXPR}.telegram_chat_id }}}}",
             "text": "={{ $json.text }}",
-            "additionalFields": {
-                "appendAttribution": False,
-                "disable_notification": silent,
-                "disable_web_page_preview": True,
-                "parse_mode": "HTML",
-            },
+            "additionalFields": fields,
         },
         credentials={"telegramApi": TELEGRAM},
         # Telegram through a slow link: n8n waits minutes for an answer, then retries.
@@ -169,10 +175,11 @@ def nodes() -> list[dict[str, Any]]:
             (1080, 300),
             "## 2. Claim, route, send\n"
             "The engine is asked first: a notification can be claimed once, so a "
-            "repeated webhook never sends twice. Critical and firing pages on-call with "
-            "sound; other critical or warning alerts (resolved, flapping) are sent "
-            "silently; info is recorded only. Telegram calls are retried 3 times, 5 s "
-            "apart.",
+            "repeated webhook never sends twice. A critical alert pages on-call with "
+            "sound at once, before any analysis; the analysis follows silently, as a "
+            "reply to the page. Other critical or warning alerts (resolved, flapping) "
+            "are sent silently; info is recorded only. Telegram calls are retried 3 "
+            "times, 5 s apart.",
         ),
         note(
             "Note: report back",
@@ -305,13 +312,16 @@ def nodes() -> list[dict[str, Any]]:
             (1760, 100),
             {
                 "rules": {
-                    "values": [route_rule("page"), route_rule("quiet"), route_rule("suppress")]
+                    "values": [
+                        route_rule(output) for output in ("page", "quiet", "reply", "suppress")
+                    ]
                 },
                 "options": {},
             },
         ),
-        telegram("Telegram: page on-call", (1980, -60), silent=False),
-        telegram("Telegram: quiet", (1980, 160), silent=True),
+        telegram("Telegram: page on-call", (1980, -120), silent=False),
+        telegram("Telegram: quiet", (1980, 60), silent=True),
+        telegram("Telegram: analysis reply", (1980, 240), silent=True, reply=True),
         node(
             "Delivery outcome",
             "code",
@@ -353,11 +363,17 @@ def connections() -> dict[str, Any]:
         "Claimed?": {"main": [_to("Format message"), _to("Already claimed")]},
         "Format message": {"main": [_to("Route by severity")]},
         "Route by severity": {
-            "main": [_to("Telegram: page on-call"), _to("Telegram: quiet"), outcome]
+            "main": [
+                _to("Telegram: page on-call"),
+                _to("Telegram: quiet"),
+                _to("Telegram: analysis reply"),
+                outcome,
+            ]
         },
         # Output 0 is the answer, output 1 the error after the retries.
         "Telegram: page on-call": {"main": [outcome, outcome]},
         "Telegram: quiet": {"main": [outcome, outcome]},
+        "Telegram: analysis reply": {"main": [outcome, outcome]},
         "Delivery outcome": {"main": [_to("Report delivery")]},
     }
 

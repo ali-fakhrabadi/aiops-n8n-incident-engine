@@ -17,7 +17,7 @@ from aiops.config import WorkerSettings
 from aiops.incidents.alertmanager import AlertmanagerWebhook
 from aiops.incidents.ingest import IngestPolicy, ingest
 from aiops.incidents.models import Incident, IncidentEvent, Notification, OutboxMessage
-from aiops.incidents.topics import TOPIC_ANALYZED, TOPIC_RESOLVED
+from aiops.incidents.topics import TOPIC_ANALYZED, TOPIC_PAGE, TOPIC_RESOLVED
 from aiops.logcontext.loki import LokiClient
 from aiops.notifications.client import N8nClient, RetryPolicy
 from aiops.notifications.signing import Signer
@@ -78,6 +78,7 @@ class Pipeline:
         )
         handlers: list[Handler] = [
             CollectLogContext(sessions, client, settings, self.metrics, clock=lambda: NOW),
+            NotifyIncident(TOPIC_PAGE, sessions, n8n, self.metrics, clock=lambda: NOW),
             NotifyIncident(TOPIC_ANALYZED, sessions, n8n, self.metrics, clock=lambda: NOW),
             NotifyIncident(TOPIC_RESOLVED, sessions, n8n, self.metrics, clock=lambda: NOW),
             analyze,

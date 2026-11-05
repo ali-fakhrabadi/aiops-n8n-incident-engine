@@ -5,7 +5,9 @@
 // anything, including markup meant to fake a message or hide a link.
 //
 // Routes (the Switch node after this one sends each to its own branch):
-//   page      critical and firing, not flapping: a message with sound
+//   page      critical and firing, not flapping: a message with sound. The engine sends
+//             these at once, before any analysis, as their own message kind ("page")
+//   reply     the analysis that follows a page: silent, a reply to the page in the chat
 //   quiet     any other critical or warning (flapping, resolved): a silent message
 //   suppress  info and everything else: recorded, not sent
 const MAX_LENGTH = 4096; // Telegram's limit for one message
@@ -28,6 +30,11 @@ function clip(value, max) {
 }
 
 function route() {
+  if (notification.kind === 'page') return 'page';
+  if (notification.follows_page) {
+    // Without the page's message ID (its delivery failed) there is nothing to reply to.
+    return notification.reply_to_message_id ? 'reply' : 'quiet';
+  }
   const severity = incident.severity;
   if (severity === 'critical' && incident.status === 'firing' && !incident.flapping) {
     return 'page';
@@ -103,15 +110,30 @@ function analysisSections() {
   return sections;
 }
 
+// The analysis that follows a page: the page already said what fires and where.
+function followUpHeader() {
+  const lines = [`🔎 <b>Analysis</b> · <b>${escape(clip(incident.alertname, 120))}</b>`];
+  if (incident.status === 'resolved' && incident.resolved_at) {
+    lines.push(`Resolved after ${duration(incident.starts_at, incident.resolved_at)}`);
+  } else {
+    lines.push(`Still firing since ${clock(incident.starts_at)}`);
+  }
+  return lines.join('\n');
+}
+
 function message() {
   const footer = `Incident <code>${escape(incident.id)}</code>`;
+  if (notification.kind === 'page') {
+    return [header(), '<i>Analysis follows.</i>', footer].join('\n\n');
+  }
+  const top = notification.follows_page ? followUpHeader() : header();
   // The all-clear is short; the firing message carries the analysis.
   const sections = notification.kind === 'resolved' ? [] : analysisSections();
   // Header and footer are clipped field by field and stay far below the limit.
-  let text = [header(), ...sections, footer].join('\n\n');
+  let text = [top, ...sections, footer].join('\n\n');
   while (text.length > MAX_LENGTH && sections.length) {
     sections.pop();
-    text = [header(), ...sections, footer].join('\n\n');
+    text = [top, ...sections, footer].join('\n\n');
   }
   return text;
 }
@@ -122,6 +144,7 @@ return [
     json: {
       route: chosen,
       disable_notification: chosen !== 'page',
+      reply_to_message_id: chosen === 'reply' ? Number(notification.reply_to_message_id) : null,
       text: message(),
       notification_id: notification.id,
       incident_id: incident.id,

@@ -71,9 +71,9 @@ class Recorded:
         if completed is None:
             return None
         start = (
-            self.incident.first_received_at
-            if self.notification.kind == NotificationKind.FIRING
-            else self.incident.resolved_at
+            self.incident.resolved_at
+            if self.notification.kind == NotificationKind.RESOLVED
+            else self.incident.first_received_at
         )
         return (completed - start).total_seconds() if start is not None else None
 
