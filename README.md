@@ -258,6 +258,15 @@ two injected 502s the delivery took 10.3 s inside n8n, its two 5 s waits. Real T
 answers the same host's `getMe` and `getChat` in 15 to 21 s over its slow outbound link,
 which is why nothing on the path gives up after a few seconds.
 
+**End to end through the observability stack** (a fault drill whose container logs an
+error every second, real Telegram, same day): its Alertmanager delivered the alert 10.0 s
+after it fired, the 200 log lines were collected 0.2 s later, the model needed 162 s on
+a CPU that was busy with other work, the message went to n8n 0.4 s after the analysis,
+and n8n and Telegram took 9.5 s. Real messages took 7.6 to 22 s in n8n and Telegram.
+Running the model on the monitored host shows, too: a long analysis loads the CPU enough
+for the stack's own `HostHighCpuUsage` warning, and with both stacks and other workloads
+on 9.7 GB of memory, `llama3.1` fits only just.
+
 **Metrics.** The worker counts hand-offs by kind and outcome
 (`aiops_notification_handoffs_total`, `aiops_notification_handoff_seconds`); the API
 counts reported outcomes by kind, route and status (`aiops_notifications_total`) and
