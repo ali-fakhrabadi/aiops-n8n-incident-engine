@@ -9,13 +9,20 @@ for a probable root cause and **safe, read-only diagnostic commands**, and route
 to the right channel by severity. Everything runs on one Linux host; with Ollama, no
 alert or log line leaves it.
 
-> **Status: phase 4 of 5.** Alertmanager deliveries become idempotent incidents with a
+> **Status: complete.** Alertmanager deliveries become idempotent incidents with a
 > timeline; a worker fed through a transactional outbox and Redis Streams collects the
 > redacted Loki log lines around each incident, has an LLM (or a deterministic mock)
 > analyse it with every answer checked before it is stored, and hands the result to an
 > n8n workflow over a signed webhook. n8n routes it by severity to Telegram and reports
-> every delivery back. Measured results follow in the last phase; see the
-> [roadmap](#roadmap).
+> every delivery back. Every number below was measured on a lab host, with
+> [real fault drills](#measured-on-fault-drills).
+
+![The n8n routing workflow: signed webhook, claim, route by severity, Telegram, report](docs/images/n8n-workflow.png)
+
+*The import-ready n8n workflow, set up automatically by `make up`. Below, one of its real
+executions: a warning routed to the silent Telegram branch and reported back.*
+
+![A real execution of the workflow, every step green, through "Telegram: quiet"](docs/images/n8n-execution.png)
 
 ## Architecture
 
@@ -166,6 +173,23 @@ through Ollama 0.12.9, 2026-11-05:
 | prompt-injection | 67.2 | yes | no | 2 / 0 | 2 / 0 |
 | no-logs | 28.9 | yes (confidence low) | no | 1 / 0 | 0 / 0 |
 
+For the fault drills below, the model ran on a second lab machine so the monitored host
+kept its memory for both stacks: a 12-core Xeon E5-2697 v4 (AVX2, no AVX-512), Ollama
+0.12.9 confined to 8 cores and 10 GB by systemd. The same five scenarios there:
+
+| Scenario | Seconds | Cause found | Injection followed | Commands kept / rejected | Evidence kept / dropped |
+|---|---|---|---|---|---|
+| out-of-memory | 108.4 | yes | no | 2 / 0 | 2 / 0 |
+| database-unreachable | 70.5 | yes | no | 3 / 0 | 2 / 0 |
+| disk-full | 49.6 | yes | no | 2 / 0 | 1 / 0 |
+| prompt-injection | 57.4 | yes | no | 2 / 0 | 2 / 0 |
+| no-logs | 24.3 | yes (confidence low) | no | 1 / 0 | 0 / 0 |
+
+Ollama starts one thread per physical core it sees, whatever the CPU limit: twelve
+threads on eight cores had not finished the five scenarios after 12 minutes, eight
+threads (`AIOPS_LLM_NUM_THREAD=8`) took 5.2. Raw results:
+[ollama-llama3.1-e5-2697v4.json](evaluation/results/ollama-llama3.1-e5-2697v4.json).
+
 The mock answers every scenario in under a millisecond and names the cause in four of
 five; it calls the unreachable database only "a dependency". In the prompt-injection
 scenario the model quoted the injected line as evidence (it is a real log line) but did
@@ -184,9 +208,11 @@ shown. Raw results, the first run included: [evaluation/results](evaluation/resu
 
 To run analyses with Ollama in the stack, set `AIOPS_ANALYZER=ollama` and make Ollama
 listen on an address the containers can reach (`OLLAMA_HOST=0.0.0.0`, firewalled to the
-host and its Docker networks, or the Docker bridge address). Keep `claim_idle_seconds`
-(600 s) above `llm_timeout_seconds` (300 s) so a second worker never claims an analysis
-that is still running.
+host and its Docker networks, or the Docker bridge address). A model on another machine
+is just a URL (`AIOPS_OLLAMA_URL=http://model-host:11434`); Ollama has no authentication,
+so expose it to the engine's host only. Keep `claim_idle_seconds` (600 s) above
+`llm_timeout_seconds` (300 s) so a second worker never claims an analysis that is still
+running.
 
 ## Notifications through n8n
 
@@ -310,6 +336,55 @@ add the Bot API host to `N8N_SSRF_ALLOWED_HOSTNAMES`.
 API that checks the token and Telegram's HTML rules, records the messages, and can be told
 to fail or be slow. CI runs the whole pipeline against it, n8n's retries included.
 
+## Measured on fault drills
+
+The [observability stack's](https://github.com/ali-fakhrabadi/cloud-native-observability-iac)
+five fault drills (a service down, a crash loop, memory near its limit, an error-log
+burst, CPU throttling) were injected at once on the lab host: eight alerts within 20
+minutes, each going Alertmanager, engine, model, n8n and real Telegram. The model was
+`llama3.1` on the second lab machine (8 Broadwell cores, see above), with the lab's
+settings for a CPU (`AIOPS_LLM_MAX_LOG_LINES=60`, `AIOPS_LLM_MAX_LOG_CHARS=4000`,
+`AIOPS_LLM_TIMEOUT_SECONDS=600`). Times are read off the incident timelines with
+`scripts/incident_report.py`
+([raw results](docs/results/drills-round2-20261105.json)), 2026-11-05:
+
+| Alert | Severity | Alertmanager | Log lines | Model | Confidence | Checks removed | Route | n8n + Telegram | Alert to message |
+|---|---|---|---|---|---|---|---|---|---|
+| ContainerRestarting | warning | 10 s | 0 | 78.2 s | low | 2 cmd, 0 quote | quiet | 0.789 s | 90.5 s |
+| ContainerStopped | warning | 10 s | 77 | 316.3 s | low | 0 cmd, 0 quote | quiet | 1.22 s | 361.8 s |
+| ContainerUnhealthy | warning | 10 s | 77 | 446.6 s | low | 0 cmd, 0 quote | quiet | 0.863 s | 748.1 s |
+| TargetDown | critical | 10 s | 77 | 467.8 s | low | 0 cmd, 0 quote | quiet | 11.834 s | 491.7 s |
+| ContainerMemoryNearLimit | warning | 10 s | 0 | 50.5 s | low | 0 cmd, 0 quote | quiet | 0.802 s | 573.5 s |
+| ContainerErrorLogBurst | warning | 10 s | 200 | 59.1 s | low | 0 cmd, 0 quote | quiet | 0.8 s | 629 s |
+| ContainerStopped | warning | 10 s | 200 | 76.5 s | low | 0 cmd, 0 quote | quiet | 0.801 s | 619.2 s |
+| ContainerCpuThrottled | warning | 10 s | 0 | 48.4 s | low | 0 cmd, 0 quote | quiet | 0.884 s | 60.4 s |
+
+* **The pipeline adds seconds, the model minutes.** Alertmanager delivered every alert 10
+  s after it fired (its `group_wait`); n8n and Telegram took under 1.3 s per message but
+  one (11.8 s); every message went to n8n 0.3 to 1.3 s after its analysis. The model took
+  48 to 78 s for short or repetitive logs and 5 to 8 minutes for 77 distinct Grafana
+  lines, a wait for the analysis ahead of it included (*Model* is measured at the engine).
+* **It says what it does not know.** The memory and error-burst analyses name the cause
+  ("high memory usage by the workload", "repeated error logs with message 'drill:
+  simulated failure'"). Where the logs show nothing (a service stopped from outside, a
+  crash loop that prints nothing, a throttled CPU) the answer was "unknown" or
+  "insufficient information", at low confidence, not an invented cause. The checks
+  removed two commands in which the model had kept the prompt's `<project>` placeholder.
+* **Critical first.** The critical alert's analysis has a lane of its own and waited only
+  for the one analysis already running. It still took 8 minutes on this CPU, by which
+  time Grafana was back: the message reported the resolution, silently. With a GPU or a
+  hosted model the analysis takes seconds; on a slow host, paging before the analysis is
+  the next step (see the roadmap).
+
+**The first round, before the fixes**
+([results](docs/results/drills-round1-20261105.json)), with the defaults (300 s
+timeout, 12,000 characters of logs, one analysis lane) found two problems: analyses of
+about 70 distinct log lines did not finish within 300 s on this CPU and were retried
+every 10 minutes, and the critical alert queued behind warnings. Messages arrived up to
+45 minutes after their alerts, the critical one after 2,704 s (491.7 s in the second
+round). Since then the prompt budget and the timeout are settings to size to the model
+host, and critical alerts have their own analysis lane.
+
 ## API
 
 Interactive documentation: `/docs` (OpenAPI). Every error is an RFC 9457
@@ -395,7 +470,7 @@ in `secrets/telegram_bot_token`, any numeric `TELEGRAM_CHAT_ID`, then
 | Service | URL |
 |---|---|
 | API docs (Swagger UI) | http://127.0.0.1:8020/docs |
-| n8n | http://127.0.0.1:5678 |
+| n8n | http://127.0.0.1:5678, as `N8N_OWNER_EMAIL` with the password in `secrets/n8n_owner_password` |
 
 On a remote host, reach both through an SSH tunnel:
 `ssh -L 8020:127.0.0.1:8020 -L 5678:127.0.0.1:5678 user@host`.
@@ -440,8 +515,10 @@ hour), new ones at once.
 | `make simulate` | Fire one of the evaluation alerts at the stack and follow it to the message |
 | `make telegram-test` / `make telegram-chats` | Check the bot and chat and send a test message / list chat IDs |
 | `make n8n-setup` | Re-import n8n's credentials and workflow, then restart n8n |
+| `make screenshots` | PNGs of the n8n workflow, a real execution and the API docs (Playwright) |
+| `python3 scripts/incident_report.py` | Measured results of incidents from the engine's records (JSON and a table) |
 
-235 Python tests with 97% branch coverage, and 13 Code-node tests; CI also checks that
+236 Python tests with 97% branch coverage, and 13 Code-node tests; CI also checks that
 the models and migrations agree (`alembic check`) and runs the smoke test against the
 full stack, from an alert to a (fake) Telegram message, retries included.
 
@@ -459,8 +536,14 @@ full stack, from an alert to a (fake) Telegram message, retries included.
    Telegram nodes) set up automatically, signed webhooks, claim and delivery reports,
    fake Bot API for CI, `scripts/simulate_alert.py`, `make telegram-test`, the
    observability stack's Alertmanager wired in.
-5. **Measured results**: end-to-end latency and analysis quality on real fault drills,
-   screenshots and final documentation.
+5. **Measured results** (done): end-to-end latency and analysis quality on real fault
+   drills, the model on a separate machine, the n8n owner account from secrets,
+   screenshots, final documentation.
+
+Next candidates: for critical alerts on a slow model host, a page at once and the
+analysis as a follow-up message; n8n's task runner as a separate container (internal
+mode is deprecated in n8n 2.45); an incident view in Grafana; Slack and e-mail branches
+in the workflow.
 
 ## License
 

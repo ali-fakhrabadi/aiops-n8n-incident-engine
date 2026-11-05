@@ -1,0 +1,314 @@
+[
+  {
+    "alertname": "ContainerRestarting",
+    "severity": "warning",
+    "labels": {
+      "name": "drill-crash-loop-202611051411-1",
+      "severity": "warning",
+      "alertname": "ContainerRestarting"
+    },
+    "started_at": "2026-11-05T14:11:58.321000Z",
+    "alertmanager_seconds": 10.0,
+    "duration_seconds": 970.0,
+    "log_lines": 0,
+    "context_status": "empty",
+    "analysis_status": "completed",
+    "model": "ollama llama3.1",
+    "model_seconds": 78.2,
+    "confidence": "low",
+    "probable_cause": "Unknown",
+    "commands": [
+      "docker ps --all --filter name=drill-crash-loop-202611051411-1",
+      "docker logs --tail 200 drill-crash-loop-202611051411-1",
+      "docker inspect drill-crash-loop-202611051411-1",
+      "docker stats --no-stream drill-crash-loop-202611051411-1"
+    ],
+    "commands_rejected": 2,
+    "evidence_kept": 0,
+    "evidence_dropped": 0,
+    "messages": [
+      {
+        "kind": "firing",
+        "status": "delivered",
+        "route": "quiet",
+        "seconds_in_channel": 0.789,
+        "alert_to_message_seconds": 90.5,
+        "analysis_to_handoff_seconds": 0.8
+      },
+      {
+        "kind": "resolved",
+        "status": "delivered",
+        "route": "quiet",
+        "seconds_in_channel": 0.872,
+        "alert_to_message_seconds": 1.7,
+        "analysis_to_handoff_seconds": null
+      }
+    ]
+  },
+  {
+    "alertname": "ContainerStopped",
+    "severity": "warning",
+    "labels": {
+      "name": "observability-grafana-1",
+      "severity": "warning",
+      "alertname": "ContainerStopped"
+    },
+    "started_at": "2026-11-05T14:12:43.321000Z",
+    "alertmanager_seconds": 10.0,
+    "duration_seconds": 130.0,
+    "log_lines": 77,
+    "context_status": "collected",
+    "analysis_status": "completed",
+    "model": "ollama llama3.1",
+    "model_seconds": 316.3,
+    "confidence": "low",
+    "probable_cause": "Insufficient information to determine the probable cause of the alert.",
+    "commands": [
+      "docker ps --all --filter name=observability-grafana-1",
+      "docker logs --tail 200 observability-grafana-1",
+      "docker inspect observability-grafana-1",
+      "docker stats --no-stream observability-grafana-1",
+      "docker compose -p observability ps grafana",
+      "docker compose -p observability logs --tail 200 grafana"
+    ],
+    "commands_rejected": 0,
+    "evidence_kept": 5,
+    "evidence_dropped": 0,
+    "messages": [
+      {
+        "kind": "firing",
+        "status": "delivered",
+        "route": "quiet",
+        "seconds_in_channel": 1.22,
+        "alert_to_message_seconds": 361.8,
+        "analysis_to_handoff_seconds": 0.3
+      }
+    ]
+  },
+  {
+    "alertname": "ContainerUnhealthy",
+    "severity": "warning",
+    "labels": {
+      "name": "observability-grafana-1",
+      "severity": "warning",
+      "alertname": "ContainerUnhealthy",
+      "compose_project": "observability",
+      "compose_service": "grafana"
+    },
+    "started_at": "2026-11-05T14:13:43.321000Z",
+    "alertmanager_seconds": 10.0,
+    "duration_seconds": 130.0,
+    "log_lines": 77,
+    "context_status": "collected",
+    "analysis_status": "completed",
+    "model": "ollama llama3.1",
+    "model_seconds": 446.6,
+    "confidence": "low",
+    "probable_cause": "Container health check failure",
+    "commands": [
+      "docker logs --tail 200 observability-grafana-1",
+      "docker inspect observability-grafana-1"
+    ],
+    "commands_rejected": 0,
+    "evidence_kept": 2,
+    "evidence_dropped": 0,
+    "messages": [
+      {
+        "kind": "firing",
+        "status": "delivered",
+        "route": "quiet",
+        "seconds_in_channel": 0.863,
+        "alert_to_message_seconds": 748.1,
+        "analysis_to_handoff_seconds": 0.4
+      }
+    ]
+  },
+  {
+    "alertname": "TargetDown",
+    "severity": "critical",
+    "labels": {
+      "severity": "critical",
+      "alertname": "TargetDown"
+    },
+    "started_at": "2026-11-05T14:14:03.025000Z",
+    "alertmanager_seconds": 10.0,
+    "duration_seconds": 130.0,
+    "log_lines": 77,
+    "context_status": "collected",
+    "analysis_status": "completed",
+    "model": "ollama llama3.1",
+    "model_seconds": 467.8,
+    "confidence": "low",
+    "probable_cause": "unknown",
+    "commands": [
+      "docker ps --all --filter name=observability-grafana-1",
+      "docker logs --tail 200 observability-grafana-1"
+    ],
+    "commands_rejected": 0,
+    "evidence_kept": 2,
+    "evidence_dropped": 0,
+    "messages": [
+      {
+        "kind": "firing",
+        "status": "delivered",
+        "route": "quiet",
+        "seconds_in_channel": 11.834,
+        "alert_to_message_seconds": 491.7,
+        "analysis_to_handoff_seconds": 1.3
+      }
+    ]
+  },
+  {
+    "alertname": "ContainerMemoryNearLimit",
+    "severity": "warning",
+    "labels": {
+      "name": "drill-memory-pressure-202611051411-1",
+      "severity": "warning",
+      "alertname": "ContainerMemoryNearLimit"
+    },
+    "started_at": "2026-11-05T14:17:28.321000Z",
+    "alertmanager_seconds": 10.0,
+    "duration_seconds": 130.0,
+    "log_lines": 0,
+    "context_status": "empty",
+    "analysis_status": "completed",
+    "model": "ollama llama3.1",
+    "model_seconds": 50.5,
+    "confidence": "low",
+    "probable_cause": "Insufficient memory allocated to the container or high memory usage by the workload",
+    "commands": [
+      "docker stats --no-stream drill-memory-pressure-202611051411-1",
+      "docker inspect drill-memory-pressure-202611051411-1"
+    ],
+    "commands_rejected": 0,
+    "evidence_kept": 0,
+    "evidence_dropped": 0,
+    "messages": [
+      {
+        "kind": "firing",
+        "status": "delivered",
+        "route": "quiet",
+        "seconds_in_channel": 0.802,
+        "alert_to_message_seconds": 573.5,
+        "analysis_to_handoff_seconds": 0.4
+      }
+    ]
+  },
+  {
+    "alertname": "ContainerErrorLogBurst",
+    "severity": "warning",
+    "labels": {
+      "severity": "warning",
+      "alertname": "ContainerErrorLogBurst",
+      "compose_project": "drill",
+      "compose_service": "drill-error-log-burst-202611051411-1"
+    },
+    "started_at": "2026-11-05T14:17:31.825000Z",
+    "alertmanager_seconds": 10.0,
+    "duration_seconds": 370.0,
+    "log_lines": 200,
+    "context_status": "collected",
+    "analysis_status": "completed",
+    "model": "ollama llama3.1",
+    "model_seconds": 59.1,
+    "confidence": "low",
+    "probable_cause": "Untrusted data: repeated error logs with message 'drill: simulated failure'",
+    "commands": [
+      "docker logs --tail 200 drill-error-log-burst-202611051411-1",
+      "docker stats --no-stream drill-error-log-burst-202611051411-1"
+    ],
+    "commands_rejected": 0,
+    "evidence_kept": 1,
+    "evidence_dropped": 0,
+    "messages": [
+      {
+        "kind": "firing",
+        "status": "delivered",
+        "route": "quiet",
+        "seconds_in_channel": 0.8,
+        "alert_to_message_seconds": 629.0,
+        "analysis_to_handoff_seconds": 0.3
+      }
+    ]
+  },
+  {
+    "alertname": "ContainerStopped",
+    "severity": "warning",
+    "labels": {
+      "name": "drill-error-log-burst-202611051411-1",
+      "severity": "warning",
+      "alertname": "ContainerStopped"
+    },
+    "started_at": "2026-11-05T14:18:58.321000Z",
+    "alertmanager_seconds": 10.0,
+    "duration_seconds": 610.0,
+    "log_lines": 200,
+    "context_status": "collected",
+    "analysis_status": "completed",
+    "model": "ollama llama3.1",
+    "model_seconds": 76.5,
+    "confidence": "low",
+    "probable_cause": "Insufficient information to determine the cause of the container stop.",
+    "commands": [
+      "docker compose -p drill ps drill-error-log-burst-202611051411-1",
+      "docker logs --tail 200 drill-error-log-burst-202611051411-1"
+    ],
+    "commands_rejected": 0,
+    "evidence_kept": 2,
+    "evidence_dropped": 0,
+    "messages": [
+      {
+        "kind": "firing",
+        "status": "delivered",
+        "route": "quiet",
+        "seconds_in_channel": 0.801,
+        "alert_to_message_seconds": 619.2,
+        "analysis_to_handoff_seconds": 0.5
+      }
+    ]
+  },
+  {
+    "alertname": "ContainerCpuThrottled",
+    "severity": "warning",
+    "labels": {
+      "name": "drill-cpu-saturation-202611051411-1",
+      "severity": "warning",
+      "alertname": "ContainerCpuThrottled"
+    },
+    "started_at": "2026-11-05T14:30:58.321000Z",
+    "alertmanager_seconds": 10.0,
+    "duration_seconds": 130.0,
+    "log_lines": 0,
+    "context_status": "empty",
+    "analysis_status": "completed",
+    "model": "ollama llama3.1",
+    "model_seconds": 48.4,
+    "confidence": "low",
+    "probable_cause": "Unknown",
+    "commands": [
+      "docker ps --all --filter name=drill-cpu-saturation-202611051411-1",
+      "docker stats --no-stream drill-cpu-saturation-202611051411-1"
+    ],
+    "commands_rejected": 0,
+    "evidence_kept": 0,
+    "evidence_dropped": 0,
+    "messages": [
+      {
+        "kind": "firing",
+        "status": "delivered",
+        "route": "quiet",
+        "seconds_in_channel": 0.884,
+        "alert_to_message_seconds": 60.4,
+        "analysis_to_handoff_seconds": 0.4
+      },
+      {
+        "kind": "resolved",
+        "status": "delivered",
+        "route": "quiet",
+        "seconds_in_channel": 0.907,
+        "alert_to_message_seconds": 1.5,
+        "analysis_to_handoff_seconds": null
+      }
+    ]
+  }
+]

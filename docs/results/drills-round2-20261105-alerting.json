@@ -1,0 +1,76 @@
+{
+  "run": "202611051411",
+  "results": [
+    {
+      "round": 1,
+      "drill": "service-down",
+      "alert": "TargetDown",
+      "labels": {
+        "job": "grafana"
+      },
+      "expectation": "for 2m + up to 30 s scrape and evaluation + 10 s group_wait (critical)",
+      "injected_at": "2026-11-05T14:11:38.794285+00:00",
+      "time_to_alert_s": 144.2,
+      "time_to_notify_s": 154.2,
+      "time_to_resolved_s": 117.1,
+      "error": null
+    },
+    {
+      "round": 1,
+      "drill": "crash-loop",
+      "alert": "ContainerRestarting",
+      "labels": {
+        "name": "drill-crash-loop-202611051411-1"
+      },
+      "expectation": "3 restarts counted by Docker (no for) + up to 30 s scrape and evaluation + 30 s group_wait",
+      "injected_at": "2026-11-05T14:11:39.461075+00:00",
+      "time_to_alert_s": 18.9,
+      "time_to_notify_s": 48.9,
+      "time_to_resolved_s": 895.7,
+      "error": null
+    },
+    {
+      "round": 1,
+      "drill": "memory-pressure",
+      "alert": "ContainerMemoryNearLimit",
+      "labels": {
+        "name": "drill-memory-pressure-202611051411-1"
+      },
+      "expectation": "for 5m + up to 45 s cAdvisor collection, scrape and evaluation + 30 s group_wait",
+      "injected_at": "2026-11-05T14:11:39.742737+00:00",
+      "time_to_alert_s": 348.6,
+      "time_to_notify_s": 378.6,
+      "time_to_resolved_s": 299.5,
+      "error": null
+    },
+    {
+      "round": 1,
+      "drill": "error-log-burst",
+      "alert": "ContainerErrorLogBurst",
+      "labels": {
+        "compose_project": "drill",
+        "compose_service": "drill-error-log-burst-202611051411-1"
+      },
+      "expectation": "21 errors logged + for 5m + up to 1 m ruler evaluation + 30 s group_wait",
+      "injected_at": "2026-11-05T14:11:40.096886+00:00",
+      "time_to_alert_s": 351.7,
+      "time_to_notify_s": 381.7,
+      "time_to_resolved_s": 597.7,
+      "error": null
+    },
+    {
+      "round": 1,
+      "drill": "cpu-saturation",
+      "alert": "ContainerCpuThrottled",
+      "labels": {
+        "name": "drill-cpu-saturation-202611051411-1"
+      },
+      "expectation": "~4 min until the 5-minute usage rate passes 80% + for 15m + 30 s group_wait",
+      "injected_at": "2026-11-05T14:11:40.640752+00:00",
+      "time_to_alert_s": 1157.7,
+      "time_to_notify_s": 1187.7,
+      "time_to_resolved_s": 299.5,
+      "error": null
+    }
+  ]
+}
