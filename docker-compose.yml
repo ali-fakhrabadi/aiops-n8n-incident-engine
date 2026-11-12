@@ -225,7 +225,7 @@ services:
   # Skips everything when nothing changed. `make n8n-setup` reapplies and restarts n8n.
   n8n-setup:
     <<: *hardened
-    image: ${N8N_IMAGE:-n8nio/n8n:2.45.6@sha256:45edf89655fd66dd55ea9336c1791ad14777599fdbf6c5aec6db583ede99a40b}
+    image: ${N8N_IMAGE:-n8nio/n8n:2.47.3@sha256:6723b440354bb8e1395a1ecee12685fe03923f897bf6e4d5bb2c6c2bd2051697}
     restart: "no"
     entrypoint: [node, /opt/aiops/setup.mjs]
     environment:
@@ -267,7 +267,7 @@ services:
     <<: *hardened
     # Digest-pinned. Override (N8N_IMAGE) only for an image loaded from a file, which
     # keeps no registry digest; verify its ID against the pinned manifest first.
-    image: ${N8N_IMAGE:-n8nio/n8n:2.45.6@sha256:45edf89655fd66dd55ea9336c1791ad14777599fdbf6c5aec6db583ede99a40b}
+    image: ${N8N_IMAGE:-n8nio/n8n:2.47.3@sha256:6723b440354bb8e1395a1ecee12685fe03923f897bf6e4d5bb2c6c2bd2051697}
     environment:
       <<: *n8n-database
       N8N_ENCRYPTION_KEY_FILE: /run/secrets/n8n_encryption_key
@@ -357,7 +357,7 @@ services:
   # webhook's payload hash) and no other module, built in or external.
   n8n-runners:
     <<: *hardened
-    image: ${N8N_RUNNERS_IMAGE:-n8nio/runners:2.45.6@sha256:7b11feb37131eebe8e90585ab562f6a90ed2a6acb956e1e6537fe3885d7957e4}
+    image: ${N8N_RUNNERS_IMAGE:-n8nio/runners:2.47.3@sha256:464f1953988e105663da173afc521c2a231fe100efc757e3c54c44f585b10dc7}
     command: [javascript]
     environment:
       N8N_RUNNERS_TASK_BROKER_URI: http://n8n:5679
