@@ -18,6 +18,7 @@ this directory except this file is ignored by Git.
 | `n8n_webhook_secret` | HS256 key the worker signs webhooks to n8n with (n8n keeps it as a JWT credential) |
 | `telegram_bot_token` | **Yours**: the token from @BotFather. Created empty, never overwritten |
 | `n8n_owner_password` | Password of the n8n owner account (`N8N_OWNER_EMAIL` in `.env`); n8n gets its bcrypt hash |
+| `n8n_runners_auth_token` | Shared by n8n and its task-runner container: the runner presents it to n8n's task broker |
 
 Keep a backup of `n8n_encryption_key`: credentials stored in n8n cannot be decrypted
 without it.

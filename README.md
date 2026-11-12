@@ -38,6 +38,7 @@ flowchart LR
         worker -->|prompt, JSON schema| llm["Ollama / OpenAI / mock"]
         worker -->|signed webhook| n8n["n8n<br/>verify, claim,<br/>route by severity"]
         n8n -->|claim, delivery report,<br/>callback token| api
+        n8n <-->|Code node tasks| runners["Task runner<br/>no secrets,<br/>no network out"]
     end
     n8n -->|Bot API| tg["Telegram"]
     ops["Operators"] -->|API token| api
@@ -452,17 +453,19 @@ and notification hand-offs by result.
 * **n8n stays private**: telemetry, update checks, the template gallery, community
   packages and the MCP server registry (it polls api.n8n.io) are off, workflows cannot
   read the container environment, Code nodes may
-  load `crypto` and nothing else, and SSRF protection lets workflow requests reach public
+  load `crypto` and no other module, and SSRF protection lets workflow requests reach public
   hosts and, of the private addresses, only the engine's API. Its credentials (the webhook key, the callback token,
   the bot token) are built from `./secrets` by a one-shot setup container, handed to n8n's
   CLI through a file on tmpfs, and stored encrypted; the workflow itself holds no secret.
-  Code nodes run in n8n's task runner in internal mode, which n8n 2.45 marks as
-  deprecated in favour of a separate runner container (`n8nio/runners`); moving to that
-  is a planned change.
+* **Code nodes run outside n8n**, in a separate task-runner container (`n8nio/runners`,
+  n8n's external mode). It holds no database password, encryption key or credential,
+  sits on the internal network only (no route to the internet or the host), and
+  authenticates to n8n's task broker with a token of its own. So code that escaped the
+  runner's sandbox would find nothing to read and nowhere to send it.
 * **Signed, single-use webhooks** between the engine and n8n, and a callback token that
   can do nothing but report deliveries (see [Notifications](#notifications-through-n8n)).
 * **Supply chain**: hash-pinned dependencies (direct ones at least a week old when
-  chosen), digest-pinned n8n image, actions pinned to commit SHAs, Dependabot.
+  chosen), digest-pinned n8n and runner images, actions pinned to commit SHAs, Dependabot.
 
 ## Quick start
 
@@ -556,8 +559,7 @@ retries included.
    drills, critical alerts paged before their analysis, the model on a separate machine,
    the n8n owner account from secrets, screenshots, final documentation.
 
-Next candidates: n8n's task runner as a separate container (internal mode is deprecated
-in n8n 2.45); an incident view in Grafana; Slack and e-mail branches in the workflow.
+Next candidates: an incident view in Grafana; Slack and e-mail branches in the workflow.
 
 ## License
 

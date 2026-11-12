@@ -9,7 +9,8 @@
 # does not need it, so alerts are accepted while Redis is down.
 #
 # Networks:
-#   backend  internal only, no internet access: PostgreSQL, Redis, API, worker, n8n
+#   backend  internal only, no internet access: PostgreSQL, Redis, API, worker, n8n,
+#            n8n-runners (the Code nodes)
 #   edge     host ports and outbound traffic (Loki, LLM, notification channels)
 #
 # Database roles (created by docker/postgres/initdb when the volume is first created):
@@ -275,9 +276,11 @@ services:
       N8N_INSTANCE_OWNER_MANAGED_BY_ENV: "true"
       N8N_INSTANCE_OWNER_EMAIL: ${N8N_OWNER_EMAIL:-owner@example.com}
       N8N_INSTANCE_OWNER_PASSWORD_HASH_FILE: /home/node/.n8n/aiops-owner-password.bcrypt
-      # Code nodes may use crypto (the webhook signature check), and nothing else.
-      NODE_FUNCTION_ALLOW_BUILTIN: crypto
-      NODE_FUNCTION_ALLOW_EXTERNAL: ""
+      # Code nodes do not run in this container: n8n only brokers their tasks to the
+      # n8n-runners service, which authenticates with a shared token.
+      N8N_RUNNERS_MODE: external
+      N8N_RUNNERS_BROKER_LISTEN_ADDRESS: 0.0.0.0
+      N8N_RUNNERS_AUTH_TOKEN_FILE: /run/secrets/n8n_runners_auth_token
       # SSRF protection: workflow requests may reach public hosts and, of the private
       # addresses, only these hosts (the engine's API; the fake Bot API in CI), never
       # PostgreSQL, Redis or the host. Add your own with N8N_SSRF_ALLOWED_HOSTNAMES.
@@ -315,7 +318,7 @@ services:
       N8N_METRICS: "true"
       EXECUTIONS_DATA_PRUNE: "true"
       EXECUTIONS_DATA_MAX_AGE: "336"
-    secrets: [n8n_db_password, n8n_encryption_key]
+    secrets: [n8n_db_password, n8n_encryption_key, n8n_runners_auth_token]
     volumes:
       - n8n-data:/home/node/.n8n
     tmpfs:
@@ -346,6 +349,42 @@ services:
         limits:
           cpus: "1.0"
           memory: 1G
+
+  # Runs the workflow's Code nodes, apart from n8n: this container has no database
+  # password, no encryption key, no credentials and no route out of the backend network.
+  # Its launcher starts a JavaScript runner on demand and stops it when idle. The image
+  # version must match n8n's; ./docker/n8n/task-runners.json allows `crypto` (the
+  # webhook's payload hash) and no other module, built in or external.
+  n8n-runners:
+    <<: *hardened
+    image: ${N8N_RUNNERS_IMAGE:-n8nio/runners:2.45.6@sha256:7b11feb37131eebe8e90585ab562f6a90ed2a6acb956e1e6537fe3885d7957e4}
+    command: [javascript]
+    environment:
+      N8N_RUNNERS_TASK_BROKER_URI: http://n8n:5679
+      N8N_RUNNERS_AUTH_TOKEN_FILE: /run/secrets/n8n_runners_auth_token
+      N8N_RUNNERS_TASK_TIMEOUT: "60"
+      GENERIC_TIMEZONE: ${TZ:-UTC}
+    secrets: [n8n_runners_auth_token]
+    volumes:
+      - ./docker/n8n/task-runners.json:/etc/n8n-task-runners.json:ro
+    tmpfs:
+      - /tmp
+      - /home/runner:uid=1000,gid=1000,mode=0700
+    networks: [backend]
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:5680/healthz"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 15s
+    depends_on:
+      n8n:
+        condition: service_healthy
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 512M
 
   # Test runner with the dev tooling: `make test`, `make lint`, `make typecheck`.
   # Tests use their own database (aiops_test, migrated by the tests as its owner) and
@@ -418,3 +457,5 @@ secrets:
     file: ./secrets/telegram_bot_token
   n8n_owner_password:
     file: ./secrets/n8n_owner_password
+  n8n_runners_auth_token:
+    file: ./secrets/n8n_runners_auth_token

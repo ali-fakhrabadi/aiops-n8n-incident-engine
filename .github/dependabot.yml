@@ -39,5 +39,11 @@ updates:
       # Workflows are exported from one n8n major; a new major is tested deliberately.
       - dependency-name: n8nio/n8n
         update-types: ["version-update:semver-major"]
+      - dependency-name: n8nio/runners
+        update-types: ["version-update:semver-major"]
+    groups:
+      # The task-runner image must be the same version as n8n: one pull request for both.
+      n8n:
+        patterns: ["n8nio/*"]
     commit-message:
       prefix: build

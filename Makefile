@@ -33,7 +33,7 @@ UV_COMPILE := /tmp/.local/bin/uv pip compile --quiet --generate-hashes \
 SCREENSHOTS_IMAGE := aiops-screenshots:local
 N8N_IMAGE ?= n8nio/n8n:2.45.6@sha256:45edf89655fd66dd55ea9336c1791ad14777599fdbf6c5aec6db583ede99a40b
 REQUIRED_SECRETS := metrics_token callback_token n8n_webhook_secret n8n_owner_password \
-	telegram_bot_token
+	n8n_runners_auth_token telegram_bot_token
 
 .PHONY: help env secrets lock build up down destroy ps logs migrate revision \
 	test lint format typecheck audit ci smoke evaluate workflow workflow-check \
