@@ -17,6 +17,9 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     VIRTUAL_ENV=/opt/venv \
     PATH="/opt/venv/bin:${PATH}" \
     PYTHONPATH=/app/src
+# Debian security fixes published since the base image was built (the scan in CI fails
+# on HIGH and CRITICAL findings that have a fix).
+RUN apt-get update     && apt-get upgrade --yes --no-install-recommends     && rm -rf /var/lib/apt/lists/* /var/cache/apt/archives/*.deb /var/log/apt /var/log/dpkg.log
 WORKDIR /app
 
 
