@@ -108,7 +108,7 @@ services:
 
   redis:
     <<: *hardened
-    image: redis:7.4.11-alpine
+    image: redis:7.4.12-alpine
     user: redis
     command: [redis-server, /run/secrets/redis.conf]
     secrets:
